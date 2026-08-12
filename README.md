@@ -8,6 +8,14 @@ It uses Node.js built-ins and Git. There are no runtime package dependencies.
 
 ## Install
 
+Requires Git and Node.js 22.12 or later.
+
+```sh
+npm install --global @junheep/gwt
+```
+
+To install directly from a source checkout instead:
+
 ```sh
 chmod +x bin/gwt.mjs
 ln -s "$PWD/bin/gwt.mjs" ~/.local/bin/gwt

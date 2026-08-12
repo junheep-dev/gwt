@@ -1,0 +1,15 @@
+{
+  "name": "gwt",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "gwt": "bin/gwt.mjs"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

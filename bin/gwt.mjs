@@ -496,14 +496,14 @@ function runHook(name, repository, configDocument, worktree, metadata) {
     GWT_BRANCH: context.branch,
     ...Object.fromEntries(Object.entries(context.ports).map(([key, value]) => [key, String(value)])),
   }
+  console.log(`Running ${name}...`)
   const result = run(hook.path, [], {
     cwd: context.path,
     env,
     input: `${JSON.stringify(context)}\n`,
     allowFailure: true,
+    stdio: ["pipe", "inherit", "inherit"],
   })
-  if (result.stdout) process.stdout.write(result.stdout)
-  if (result.stderr) process.stderr.write(result.stderr)
   if (result.status !== 0) throw new CliError(`${name} failed with status ${result.status}`)
 }
 
@@ -817,18 +817,46 @@ function worktreeRows(repository) {
   return rows
 }
 
+function displayWidth(value) {
+  let width = 0
+  for (const character of value.normalize("NFC")) {
+    const codePoint = character.codePointAt(0)
+    if (/\p{Mark}/u.test(character) || codePoint === 0x200d) continue
+    const fullWidth = codePoint >= 0x1100 && (
+      codePoint <= 0x115f
+      || codePoint === 0x2329
+      || codePoint === 0x232a
+      || (codePoint >= 0x2e80 && codePoint <= 0xa4cf && codePoint !== 0x303f)
+      || (codePoint >= 0xac00 && codePoint <= 0xd7a3)
+      || (codePoint >= 0xf900 && codePoint <= 0xfaff)
+      || (codePoint >= 0xfe10 && codePoint <= 0xfe19)
+      || (codePoint >= 0xfe30 && codePoint <= 0xfe6f)
+      || (codePoint >= 0xff00 && codePoint <= 0xff60)
+      || (codePoint >= 0xffe0 && codePoint <= 0xffe6)
+      || (codePoint >= 0x1f300 && codePoint <= 0x1faff)
+      || (codePoint >= 0x20000 && codePoint <= 0x3fffd)
+    )
+    width += fullWidth ? 2 : 1
+  }
+  return width
+}
+
+function padDisplay(value, width) {
+  return `${value}${" ".repeat(Math.max(0, width - displayWidth(value)))}`
+}
+
 function commandList(args) {
   if (args.length > 0) throw new CliError("Usage: gwt list")
   const repository = discoverRepository()
   const rows = worktreeRows(repository)
   const widths = {
-    id: Math.max(2, ...rows.map((row) => row.id.length)),
-    branch: Math.max(6, ...rows.map((row) => row.branch.length)),
-    setup: Math.max(5, ...rows.map((row) => row.setup.length)),
+    id: Math.max(2, ...rows.map((row) => displayWidth(row.id))),
+    branch: Math.max(6, ...rows.map((row) => displayWidth(row.branch))),
+    setup: Math.max(5, ...rows.map((row) => displayWidth(row.setup))),
   }
-  console.log(`  ${"ID".padEnd(widths.id)}  ${"BRANCH".padEnd(widths.branch)}  ${"SETUP".padEnd(widths.setup)}  PATH`)
+  console.log(`  ${padDisplay("ID", widths.id)}  ${padDisplay("BRANCH", widths.branch)}  ${padDisplay("SETUP", widths.setup)}  PATH`)
   for (const row of rows) {
-    console.log(`${row.current ? "*" : " "} ${row.id.padEnd(widths.id)}  ${row.branch.padEnd(widths.branch)}  ${row.setup.padEnd(widths.setup)}  ${row.path}`)
+    console.log(`${row.current ? "*" : " "} ${padDisplay(row.id, widths.id)}  ${padDisplay(row.branch, widths.branch)}  ${padDisplay(row.setup, widths.setup)}  ${row.path}`)
   }
 }
 
@@ -890,6 +918,7 @@ async function commandRemove(args) {
   const removeArgs = ["worktree", "remove"]
   if (options.discard) removeArgs.push("--force")
   removeArgs.push(targetPath)
+  console.log(`Removing worktree ${metadata?.id ?? targetPath}...`)
   git(removeArgs, repository.primaryPath)
   if (metadata?.metadataPath && existsSync(metadata.metadataPath)) unlinkSync(metadata.metadataPath)
 
@@ -897,7 +926,20 @@ async function commandRemove(args) {
   if (worktree.branch && !options["keep-branch"]) {
     const deleteArgs = ["branch", options.discard ? "-D" : "-d", "--", worktree.branch]
     const result = git(deleteArgs, repository.primaryPath, { allowFailure: true })
-    branchMessage = result.status === 0 ? `Deleted branch: ${worktree.branch}` : `Kept branch: ${worktree.branch}`
+    if (result.status === 0) {
+      branchMessage = `Deleted branch: ${worktree.branch}`
+    } else if (!options.discard) {
+      console.log(`Branch '${worktree.branch}' could not be deleted safely.`)
+      const forceDelete = await ask("Force-delete the branch? [y/N] ")
+      if (forceDelete) {
+        git(["branch", "-D", "--", worktree.branch], repository.primaryPath)
+        branchMessage = `Deleted branch: ${worktree.branch}`
+      } else {
+        branchMessage = `Kept branch: ${worktree.branch}\nDelete later: git branch -D -- ${worktree.branch}`
+      }
+    } else {
+      branchMessage = `Kept branch: ${worktree.branch}`
+    }
   } else if (worktree.branch) branchMessage = `Kept branch: ${worktree.branch}`
 
   console.log(`Removed worktree: ${metadata?.id ?? targetPath}`)
@@ -1311,9 +1353,10 @@ Options:
 
 Behavior:
   Without --discard, dirty worktrees are rejected and branches are deleted only
-  when 'git branch -d' considers deletion safe. The primary worktree cannot be
-  removed. Removing the current worktree returns an integrated shell to the
-  primary worktree.
+  when 'git branch -d' considers deletion safe. If safe deletion fails, an
+  interactive terminal asks whether to force-delete the branch; non-interactive
+  use keeps it. The primary worktree cannot be removed. Removing the current
+  worktree returns an integrated shell to the primary worktree.
 
 Examples:
   gwt remove

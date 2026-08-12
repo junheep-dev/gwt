@@ -227,12 +227,13 @@ describe("configuration", () => {
     const fixture = createRepository()
     const hook = join(fixture.configHome, "gwt", "hooks", "setup")
     mkdirSync(dirname(hook), { recursive: true })
-    writeFileSync(hook, "#!/bin/sh\nprintf 'ran\\n' > user-hook-result\n")
+    writeFileSync(hook, "#!/bin/sh\nprintf 'hook output\\n'\nprintf 'ran\\n' > user-hook-result\n")
     chmodSync(hook, 0o755)
     writeUserConfig(fixture, { postCreate: "hooks/setup" })
 
     const created = gwt(fixture, ["new", "feature/user-hook"])
     assert.equal(created.status, 0, created.stderr)
+    assert.match(created.stdout, /Running postCreate\.\.\.\nhook output/)
     const metadata = JSON.parse(readFileSync(metadataFiles(fixture.repository)[0], "utf8"))
     assert.equal(readFileSync(join(metadata.path, "user-hook-result"), "utf8"), "ran\n")
     assert.equal(existsSync(join(metadata.path, "hooks", "setup")), false)
@@ -265,6 +266,12 @@ describe("worktree lifecycle", () => {
     assert.match(list.stdout, new RegExp(metadata.id))
     assert.match(list.stdout, /feature\/native-flow/)
 
+    git(metadata.path, "branch", "-m", "feature/한글")
+    const localizedList = gwt(fixture, ["list"])
+    assert.equal(localizedList.status, 0, localizedList.stderr)
+    assert.match(localizedList.stdout, /main {10}-/)
+    assert.match(localizedList.stdout, /feature\/한글 {2}complete/)
+
     git(metadata.path, "branch", "-m", "feature/renamed")
     const info = gwt(fixture, ["info", metadata.id])
     assert.equal(info.status, 0, info.stderr)
@@ -281,6 +288,7 @@ describe("worktree lifecycle", () => {
 
     const removed = gwt(fixture, ["remove", metadata.id])
     assert.equal(removed.status, 0, removed.stderr)
+    assert.match(removed.stdout, new RegExp(`Removing worktree ${metadata.id}\\.\\.\\.`))
     assert.equal(existsSync(metadata.path), false)
     assert.equal(metadataFiles(fixture.repository).length, 0)
     assert.match(removed.stdout, /Deleted branch: feature\/renamed/)
@@ -375,6 +383,23 @@ describe("worktree lifecycle", () => {
     assert.equal(discard.status, 0, discard.stderr)
     assert.equal(existsSync(metadata.path), false)
     assert.match(discard.stdout, /Deleted branch: feature\/discard/)
+  })
+
+  test("explains how to delete an unmerged branch in non-interactive mode", () => {
+    const fixture = createRepository()
+    const created = gwt(fixture, ["new", "feature/unmerged"])
+    assert.equal(created.status, 0, created.stderr)
+    const metadata = JSON.parse(readFileSync(metadataFiles(fixture.repository)[0], "utf8"))
+    writeFileSync(join(metadata.path, "committed.txt"), "keep branch\n")
+    git(metadata.path, "add", "committed.txt")
+    git(metadata.path, "commit", "-m", "Add unmerged work")
+
+    const removed = gwt(fixture, ["remove", metadata.id])
+    assert.equal(removed.status, 0, removed.stderr)
+    assert.match(removed.stdout, /could not be deleted safely/)
+    assert.match(removed.stdout, /Kept branch: feature\/unmerged/)
+    assert.match(removed.stdout, /Delete later: git branch -D -- feature\/unmerged/)
+    assert.match(git(fixture.repository, "branch", "--list", "feature/unmerged"), /feature\/unmerged/)
   })
 
   test("adopts a native linked worktree during setup", () => {

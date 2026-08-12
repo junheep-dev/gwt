@@ -141,7 +141,8 @@ pnpm install --frozen-lockfile
 
 Hook paths in user config are resolved relative to the directory containing
 `config.json`; hook paths in `.gwt.json` are resolved relative to the target
-worktree. Both run with the target worktree as their working directory.
+worktree. Both run with the target worktree as their working directory, and
+their standard output and errors are streamed directly to the terminal.
 
 Hooks in user config are trusted because the user added them directly. Hooks
 from a committed `.gwt.json` require explicit trust because they execute
@@ -184,6 +185,8 @@ arrow keys, `j`/`k`, or Ctrl-n/Ctrl-p to move; press 1–9 to select a numbered
 row immediately; or press `/` to filter by branch, ID, or path. Enter switches
 to the selected worktree. Escape leaves filter mode or cancels the picker.
 
-`gwt remove` refuses dirty worktrees. It removes the branch only when
-`git branch -d` considers the deletion safe. `--discard --yes` explicitly
-allows dirty worktree removal and forced branch deletion.
+`gwt remove` refuses dirty worktrees and first tries to delete the branch with
+`git branch -d`. If Git rejects safe deletion, an interactive terminal asks
+whether to force-delete the branch; non-interactive use keeps it and prints a
+command for deleting it later. `--discard --yes` explicitly allows dirty
+worktree removal and forced branch deletion.

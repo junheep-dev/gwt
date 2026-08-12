@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { basename, dirname, join, resolve } from "node:path"
 import { afterEach, describe, test } from "node:test"
 import { mkdtempSync, rmSync } from "node:fs"
 
@@ -209,9 +209,10 @@ describe("configuration", () => {
 
   test("creates a commit-ready project config", () => {
     const fixture = createRepository()
-    writeUserConfig(fixture, { ports: ["APP_PORT"], copyFiles: [".env"] })
+    writeUserConfig(fixture, { ports: ["APP_PORT"], copyFiles: [".env"], postCreate: "hooks/setup" })
     const created = gwt(fixture, ["config", "create", "--project"])
     assert.equal(created.status, 0, created.stderr)
+    assert.match(created.stdout, /Skipped user hooks: postCreate/)
     const path = join(fixture.repository, ".gwt.json")
     assert.equal(existsSync(path), true)
     assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), {
@@ -224,18 +225,17 @@ describe("configuration", () => {
 
   test("trusts hooks from user config without project approval", () => {
     const fixture = createRepository()
-    mkdirSync(join(fixture.repository, "scripts"), { recursive: true })
-    const hook = join(fixture.repository, "scripts", "setup")
+    const hook = join(fixture.configHome, "gwt", "hooks", "setup")
+    mkdirSync(dirname(hook), { recursive: true })
     writeFileSync(hook, "#!/bin/sh\nprintf 'ran\\n' > user-hook-result\n")
     chmodSync(hook, 0o755)
-    git(fixture.repository, "add", "scripts/setup")
-    git(fixture.repository, "commit", "-m", "Add setup hook")
-    writeUserConfig(fixture, { postCreate: "scripts/setup" })
+    writeUserConfig(fixture, { postCreate: "hooks/setup" })
 
     const created = gwt(fixture, ["new", "feature/user-hook"])
     assert.equal(created.status, 0, created.stderr)
     const metadata = JSON.parse(readFileSync(metadataFiles(fixture.repository)[0], "utf8"))
     assert.equal(readFileSync(join(metadata.path, "user-hook-result"), "utf8"), "ran\n")
+    assert.equal(existsSync(join(metadata.path, "hooks", "setup")), false)
     assert.equal(existsSync(join(fixture.configHome, "gwt", "approvals.json")), false)
   })
 })
@@ -256,6 +256,7 @@ describe("worktree lifecycle", () => {
     const metadata = JSON.parse(readFileSync(metadataFile, "utf8"))
     assert.equal(metadata.setup, "complete")
     assert.equal(metadata.id.length, 8)
+    assert.equal(metadata.id, basename(metadata.path))
     assert.equal(metadata.ports.SERVER_PORT, metadata.ports.WEB_PORT + 1)
     assert.equal(readFileSync(join(metadata.path, "apps", "web", ".env"), "utf8"), "SECRET=local\n")
 

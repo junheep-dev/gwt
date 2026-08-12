@@ -117,7 +117,7 @@ function discoverRepository(cwd = process.cwd()) {
 
 function validateRelativePath(value, field) {
   if (typeof value !== "string" || value.length === 0) throw new CliError(`${field} must be a non-empty string`)
-  if (isAbsolute(value)) throw new CliError(`${field} must be relative to the repository`)
+  if (isAbsolute(value)) throw new CliError(`${field} must be a relative path`)
   const normalized = value.split(/[\\/]+/)
   if (normalized.some((part) => part === "..")) throw new CliError(`${field} cannot contain '..'`)
   return value
@@ -369,15 +369,21 @@ async function allocatePorts(repository, id, names) {
   throw new CliError(`No free port block is available in ${PORT_MIN}-${PORT_MAX}`)
 }
 
-function hookPaths(config, worktreePath) {
+function hookPaths(configDocument, worktreePath) {
+  const config = configDocument.value
+  const root = configDocument.source === "user"
+    ? canonical(dirname(configDocument.path))
+    : canonical(worktreePath)
+  const location = configDocument.source === "user" ? "user config directory" : "worktree"
+
   return ["postCreate", "preRemove"]
     .filter((name) => config[name])
     .map((name) => {
-      const configuredPath = resolve(worktreePath, config[name])
-      if (!isInside(worktreePath, configuredPath)) throw new CliError(`${name} must be inside the worktree`)
+      const configuredPath = resolve(root, config[name])
+      if (!isInside(root, configuredPath)) throw new CliError(`${name} must be inside the ${location}`)
       if (!existsSync(configuredPath)) throw new CliError(`${name} does not exist: ${config[name]}`)
       const path = canonical(configuredPath)
-      if (!isInside(worktreePath, path)) throw new CliError(`${name} must resolve inside the worktree`)
+      if (!isInside(root, path)) throw new CliError(`${name} must resolve inside the ${location}`)
       if (!statSync(path).isFile()) throw new CliError(`${name} must point to a file`)
       try {
         accessSync(path, constants.X_OK)
@@ -389,7 +395,7 @@ function hookPaths(config, worktreePath) {
 }
 
 function trustFingerprint(repository, configDocument, worktreePath) {
-  const hooks = hookPaths(configDocument.value, worktreePath)
+  const hooks = hookPaths(configDocument, worktreePath)
   if (hooks.length === 0) return null
   const hash = createHash("sha256")
   hash.update(repository.primaryPath)
@@ -459,7 +465,7 @@ async function ensureTrusted(repository, configDocument, worktreePath) {
   const fingerprint = trustFingerprint(repository, configDocument, worktreePath)
   if (!fingerprint || isTrusted(repository, fingerprint)) return
 
-  const hooks = hookPaths(configDocument.value, worktreePath)
+  const hooks = hookPaths(configDocument, worktreePath)
   console.error("This repository wants to run:")
   for (const hook of hooks) console.error(`  ${hook.name}: ${hook.configuredPath}`)
   const allowed = await ask("Allow and remember? [y/N] ")
@@ -480,7 +486,7 @@ function hookContext(repository, worktree, metadata) {
 function runHook(name, repository, configDocument, worktree, metadata) {
   const configuredPath = configDocument.value[name]
   if (!configuredPath) return
-  const hook = hookPaths(configDocument.value, canonical(worktree.path)).find((item) => item.name === name)
+  const hook = hookPaths(configDocument, canonical(worktree.path)).find((item) => item.name === name)
   const context = hookContext(repository, worktree, metadata)
   const env = {
     ...process.env,
@@ -530,7 +536,7 @@ async function setupWorktree(repository, configDocument, worktree, options = {})
   let metadata = metadataForWorktree(repository, worktree)
 
   if (!metadata) {
-    const id = generateId(repository, configDocument.value)
+    const id = options.id ?? generateId(repository, configDocument.value)
     metadata = {
       version: 1,
       id,
@@ -632,7 +638,10 @@ async function commandNew(args) {
   const worktree = refreshed.worktrees.find((item) => resolve(item.path) === resolve(target))
 
   try {
-    const metadata = await setupWorktree(refreshed, configDocument, worktree, { noHooks: options["no-hooks"] })
+    const metadata = await setupWorktree(refreshed, configDocument, worktree, {
+      id,
+      noHooks: options["no-hooks"],
+    })
     console.log(`Worktree ${metadata.id} is ready at ${target}`)
     console.log(`Branch: ${branch}`)
     for (const [name, port] of Object.entries(metadata.ports)) console.log(`${name}: ${port}`)
@@ -935,8 +944,14 @@ function commandConfigCreate(args) {
     const path = projectConfigPath(repository)
     if (existsSync(path)) throw new CliError(`Project config already exists: ${path}`)
     const active = loadConfig(repository)
-    writeJson(path, active.source === "user" ? active.value : configScaffold(), 0o644)
+    const value = active.source === "user" ? { ...active.value } : configScaffold()
+    const skippedHooks = ["postCreate", "preRemove"].filter((name) => value[name])
+    for (const hook of skippedHooks) delete value[hook]
+    writeJson(path, value, 0o644)
     console.log(`Created project config: ${path}`)
+    if (skippedHooks.length > 0) {
+      console.log(`Skipped user hooks: ${skippedHooks.join(", ")}. Add repository-relative hook paths explicitly.`)
+    }
     return
   }
 
@@ -1348,10 +1363,13 @@ Options:
                   an entry to the user config.
   -h, --help      Show help for this command.
 
-By default, the project is added to ${userConfigPath()}. With --project, the
-active user configuration is copied when available; otherwise a default
-scaffold is created. Repository configuration takes precedence and can be
-committed for the team.
+By default, the project is added to the user config:
+  ${userConfigPath()}
+
+With --project, the active user configuration's non-hook fields are copied
+when available; otherwise a default scaffold is created. User hooks are omitted
+because repository hooks use worktree-relative paths. Repository configuration
+takes precedence and can be committed for the team.
 
 Examples:
   gwt config create

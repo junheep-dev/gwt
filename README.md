@@ -59,8 +59,8 @@ Repositories without a remote use their canonical path.
         "WEB_PORT",
         "SERVER_PORT"
       ],
-      "postCreate": "./scripts/worktree-setup",
-      "preRemove": "./scripts/worktree-cleanup"
+      "postCreate": "hooks/worktree-setup",
+      "preRemove": "hooks/worktree-cleanup"
     }
   }
 }
@@ -74,10 +74,10 @@ instead:
 gwt config create --project
 ```
 
-If user configuration exists for the repository, it is copied into the
-new project file so it can be committed directly. Otherwise, the command
-creates a default scaffold. The project file contains the configuration fields
-directly:
+If user configuration exists for the repository, its non-hook fields are copied
+into the new project file. User hooks are omitted because their paths use a
+different base directory. Otherwise, the command creates a default scaffold.
+The project file contains the configuration fields directly:
 
 ```json
 {
@@ -111,9 +111,8 @@ no setup actions.
   overwriting an existing destination.
 - `ports`: Environment variable names assigned stable ports in the range
   20000–39999.
-- `postCreate`: Repository-relative executable run after files and ports are
-  prepared.
-- `preRemove`: Repository-relative executable run before removal.
+- `postCreate`: Executable run after files and ports are prepared.
+- `preRemove`: Executable run before removal.
 
 The worktree directory is added to `.git/info/exclude`; tracked project files
 are not modified.
@@ -140,8 +139,12 @@ printf 'PORT=%s\n' "$SERVER_PORT" >> apps/server/.env
 pnpm install --frozen-lockfile
 ```
 
-Hooks in user config are trusted because the user added them directly.
-Hooks from a committed `.gwt.json` require explicit trust because they execute
+Hook paths in user config are resolved relative to the directory containing
+`config.json`; hook paths in `.gwt.json` are resolved relative to the target
+worktree. Both run with the target worktree as their working directory.
+
+Hooks in user config are trusted because the user added them directly. Hooks
+from a committed `.gwt.json` require explicit trust because they execute
 repository code:
 
 ```sh

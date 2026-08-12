@@ -75,6 +75,51 @@ afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true })
 })
 
+describe("help", () => {
+  test("shows concise root help and detailed command examples outside a repository", () => {
+    const fixture = createRepository()
+    const rootHelp = gwt(fixture, [])
+    assert.equal(rootHelp.status, 0, rootHelp.stderr)
+    assert.match(rootHelp.stdout, /Commands:/)
+    assert.match(rootHelp.stdout, /new\s+Create and set up a worktree/)
+    assert.match(rootHelp.stdout, /Examples:/)
+    assert.match(rootHelp.stdout, /gwt new feature\/auth/)
+    assert.doesNotMatch(rootHelp.stdout, /User configuration:/)
+    assert.doesNotMatch(rootHelp.stdout, /Repository configuration:/)
+
+    const newHelp = gwt(fixture, ["new", "--help"], { cwd: fixture.root })
+    assert.equal(newHelp.status, 0, newHelp.stderr)
+    assert.match(newHelp.stdout, /Usage:\n  gwt new/)
+    assert.match(newHelp.stdout, /Behavior:/)
+    assert.match(newHelp.stdout, /setup failure keeps the worktree/)
+    assert.match(newHelp.stdout, /Examples:/)
+  })
+
+  test("supports help for nested and common commands", () => {
+    const fixture = createRepository()
+
+    const switchHelp = gwt(fixture, ["help", "switch"])
+    assert.equal(switchHelp.status, 0, switchHelp.stderr)
+    assert.match(switchHelp.stdout, /Opens the picker when omitted/)
+    assert.match(switchHelp.stdout, /gwt switch feature\/auth/)
+
+    const removeHelp = gwt(fixture, ["remove", "-h"])
+    assert.equal(removeHelp.status, 0, removeHelp.stderr)
+    assert.match(removeHelp.stdout, /--discard/)
+    assert.match(removeHelp.stdout, /git branch -d/)
+
+    const configHelp = gwt(fixture, ["config", "create", "--help"])
+    assert.equal(configHelp.status, 0, configHelp.stderr)
+    assert.match(configHelp.stdout, /Usage:\n  gwt config create/)
+    assert.match(configHelp.stdout, /--project/)
+
+    const shellHelp = gwt(fixture, ["shell", "install", "zsh", "--help"])
+    assert.equal(shellHelp.status, 0, shellHelp.stderr)
+    assert.match(shellHelp.stdout, /--dry-run/)
+    assert.doesNotMatch(shellHelp.stdout, /gwt shell init zsh/)
+  })
+})
+
 describe("configuration", () => {
   test("rejects unknown configuration fields", () => {
     const fixture = createRepository()

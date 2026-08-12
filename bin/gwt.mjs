@@ -1031,18 +1031,22 @@ if command -v gwt >/dev/null 2>&1; then
         _arguments \
           '2:branch name:' \
           '--base[base Git revision]:revision:_gwt_refs' \
-          '--no-hooks[skip project hooks]'
+          '--no-hooks[skip project hooks]' \
+          '(-h --help)'{-h,--help}'[show help]'
         ;;
       setup)
         _arguments \
           '2:worktree:_gwt_worktrees' \
-          '--no-hooks[skip project hooks]'
+          '--no-hooks[skip project hooks]' \
+          '(-h --help)'{-h,--help}'[show help]'
         ;;
       list)
-        _arguments
+        _arguments '(-h --help)'{-h,--help}'[show help]'
         ;;
       switch|info)
-        _arguments '2:worktree:_gwt_worktrees'
+        _arguments \
+          '2:worktree:_gwt_worktrees' \
+          '(-h --help)'{-h,--help}'[show help]'
         ;;
       remove)
         _arguments \
@@ -1050,22 +1054,27 @@ if command -v gwt >/dev/null 2>&1; then
           '--keep-branch[keep the worktree branch]' \
           '--discard[discard uncommitted changes]' \
           '--yes[skip removal confirmation]' \
-          '--no-hooks[skip project hooks]'
+          '--no-hooks[skip project hooks]' \
+          '(-h --help)'{-h,--help}'[show help]'
         ;;
       trust)
-        _arguments '--revoke[revoke project hook approval]'
+        _arguments \
+          '--revoke[revoke project hook approval]' \
+          '(-h --help)'{-h,--help}'[show help]'
         ;;
       config)
         _arguments \
           '2:action:(create show)' \
-          '--project[create a config in the repository]'
+          '--project[create a config in the repository]' \
+          '(-h --help)'{-h,--help}'[show help]'
         ;;
       shell)
         _arguments \
           '2:action:(install)' \
           '3:shell:(zsh)' \
           '--dry-run[show the change without writing]' \
-          '--yes[skip installation confirmation]'
+          '--yes[skip installation confirmation]' \
+          '(-h --help)'{-h,--help}'[show help]'
         ;;
     esac
   }
@@ -1145,29 +1154,268 @@ function commandComplete(args) {
   throw new CliError("Invalid completion request")
 }
 
-function help() {
-  console.log(`gwt ${VERSION} - lightweight native Git worktree workflows
+function help(command, subcommand) {
+  const topic = [command, subcommand].filter(Boolean).join(" ")
+  const texts = {
+    "": `gwt ${VERSION} - lightweight native Git worktree workflows
+
+Usage:
+  gwt <command> [options]
+
+Commands:
+  new       Create and set up a worktree
+  setup     Set up an existing worktree
+  list      List registered worktrees
+  switch    Switch the current shell to a worktree
+  info      Show worktree details and assigned ports
+  remove    Safely remove a worktree and optionally its branch
+  trust     Approve or revoke repository project hooks
+  config    Create or inspect configuration
+  shell     Install shell integration
+
+Options:
+  -h, --help      Show help.
+  -V, --version   Show the gwt version.
+
+Examples:
+  gwt new feature/auth
+  gwt switch
+  gwt remove
+  gwt config create
+  gwt shell install zsh
+
+Run 'gwt <command> --help' for command behavior and more examples.`,
+    new: `Create a worktree, prepare its development environment, and switch to it.
 
 Usage:
   gwt new [branch] [--base <ref>] [--no-hooks]
+
+Arguments:
+  branch          New local branch name. Defaults to scratch/<id>.
+
+Options:
+  --base <ref>    Start from this Git revision instead of the configured base
+                  or the primary worktree's current commit.
+  --no-hooks      Copy files and allocate ports, but skip postCreate.
+  -h, --help      Show help for this command.
+
+Behavior:
+  The worktree receives an immutable 8-character ID. gwt creates it below the
+  configured worktreeDirectory, copies configured local files, assigns stable
+  ports, and runs postCreate. A setup failure keeps the worktree so setup can
+  be retried. With shell integration installed, the current shell moves into
+  the new worktree after setup succeeds.
+
+Examples:
+  gwt new feature/auth
+  gwt new
+  gwt new hotfix/login --base origin/main
+  gwt new experiment --no-hooks`,
+    setup: `Prepare an existing linked worktree using the active gwt configuration.
+
+Usage:
   gwt setup [id|branch|path] [--no-hooks]
+
+Arguments:
+  id|branch|path  Worktree to set up. Defaults to the current worktree.
+
+Options:
+  --no-hooks      Copy files and allocate ports, but skip postCreate.
+  -h, --help      Show help for this command.
+
+Behavior:
+  Use this to adopt a worktree created with native 'git worktree add' or to
+  retry a failed setup. Existing copied files and assigned ports are preserved.
+
+Examples:
+  gwt setup
+  gwt setup feature/auth
+  gwt setup a1b2c3d4 --no-hooks`,
+    list: `List Git worktrees together with gwt IDs and setup status.
+
+Usage:
   gwt list
+
+Options:
+  -h, --help      Show help for this command.
+
+The current worktree is marked with '*'. Native worktrees that have not been
+set up by gwt are shown as unmanaged.
+
+Example:
+  gwt list`,
+    switch: `Switch the current shell to another worktree.
+
+Usage:
   gwt switch [id|branch|path]
+
+Arguments:
+  id|branch|path  Worktree to switch to. Opens the picker when omitted.
+
+Options:
+  -h, --help      Show help for this command.
+
+Behavior:
+  The picker supports arrow keys, j/k, Ctrl-n/Ctrl-p, number shortcuts, and
+  '/' filtering. Shell integration must be installed for gwt to change the
+  parent shell's directory; otherwise the selected path is only printed.
+
+Examples:
+  gwt switch
+  gwt switch feature/auth
+  gwt switch a1b2c3d4`,
+    info: `Show a worktree's identity, Git state, setup status, and assigned ports.
+
+Usage:
   gwt info [id|branch|path]
+
+Arguments:
+  id|branch|path  Worktree to inspect. Defaults to the current worktree.
+
+Options:
+  -h, --help      Show help for this command.
+
+Examples:
+  gwt info
+  gwt info feature/auth`,
+    remove: `Safely remove a linked worktree and, by default, its branch.
+
+Usage:
   gwt remove [id|branch|path] [--keep-branch|--discard] [--yes] [--no-hooks]
+
+Arguments:
+  id|branch|path  Worktree to remove. Defaults to the current worktree.
+
+Options:
+  --keep-branch   Remove the worktree but retain its branch.
+  --discard       Allow uncommitted changes to be discarded and force-delete
+                  the branch.
+  --yes           Skip the confirmation required by --discard.
+  --no-hooks      Skip preRemove.
+  -h, --help      Show help for this command.
+
+Behavior:
+  Without --discard, dirty worktrees are rejected and branches are deleted only
+  when 'git branch -d' considers deletion safe. The primary worktree cannot be
+  removed. Removing the current worktree returns an integrated shell to the
+  primary worktree.
+
+Examples:
+  gwt remove
+  gwt remove feature/auth --keep-branch
+  gwt remove a1b2c3d4 --discard --yes`,
+    trust: `Approve or revoke hooks declared by the repository's .gwt.json.
+
+Usage:
   gwt trust [--revoke]
-  gwt config create [--project]
+
+Options:
+  --revoke        Remove the stored approval for this repository.
+  -h, --help      Show help for this command.
+
+Approval is tied to the configuration and hook contents, so changing either
+requires approval again. Hooks declared in user configuration are trusted
+automatically.
+
+Examples:
+  gwt trust
+  gwt trust --revoke`,
+    config: `Create or inspect configuration for the current repository.
+
+Usage:
+  gwt config <create|show>
+
+Commands:
+  create          Create a user config entry or a repository config file
+  show            Show config availability, source, and resolved values
+
+Options:
+  -h, --help      Show help for this command.
+
+Examples:
+  gwt config create
+  gwt config create --project
   gwt config show
+
+Run 'gwt config <command> --help' for details.`,
+    "config create": `Create configuration for the current repository.
+
+Usage:
+  gwt config create [--project]
+
+Options:
+  --project       Create .gwt.json in the primary worktree instead of adding
+                  an entry to the user config.
+  -h, --help      Show help for this command.
+
+By default, the project is added to ${userConfigPath()}. With --project, the
+active user configuration is copied when available; otherwise a default
+scaffold is created. Repository configuration takes precedence and can be
+committed for the team.
+
+Examples:
+  gwt config create
+  gwt config create --project`,
+    "config show": `Show configuration availability and the active resolved values.
+
+Usage:
+  gwt config show
+
+Options:
+  -h, --help      Show help for this command.
+
+The output distinguishes a missing user config file from an existing file that
+does not configure the current project. Repository configuration takes
+precedence over user configuration.
+
+Example:
+  gwt config show`,
+    shell: `Install shell integration for navigation and completion.
+
+Usage:
   gwt shell install zsh [--dry-run] [--yes]
 
-User configuration: ${userConfigPath()}
-Project configuration: ${PROJECT_CONFIG_FILE}`)
+Options:
+  -h, --help      Show help for this command.
+
+The integration lets gwt change the current shell's directory after new,
+switch, and removal of the current worktree. It also installs completion.
+
+Example:
+  gwt shell install zsh`,
+    "shell install": `Install gwt navigation and completion in Zsh.
+
+Usage:
+  gwt shell install zsh [--dry-run] [--yes]
+
+Options:
+  --dry-run       Print the .zshrc change without writing it.
+  --yes           Install without asking for confirmation.
+  -h, --help      Show help for this command.
+
+The command adds one initialization line to ~/.zshrc, or to $ZDOTDIR/.zshrc
+when ZDOTDIR is set. Restart Zsh or source the file after installation.
+
+Examples:
+  gwt shell install zsh
+  gwt shell install zsh --dry-run`,
+  }
+
+  if (!Object.hasOwn(texts, topic)) throw new CliError(`Unknown help topic: ${topic}`)
+  console.log(texts[topic])
 }
 
 async function main() {
   const [command, ...args] = process.argv.slice(2)
-  if (!command || command === "help" || command === "--help" || command === "-h") return help()
+  if (!command || command === "--help" || command === "-h") return help()
+  if (command === "help") return help(args[0], args[1])
   if (command === "--version" || command === "-V") return console.log(VERSION)
+  if (args.includes("--help") || args.includes("-h")) {
+    const subcommand = ["config", "shell"].includes(command)
+      ? args.find((argument) => !argument.startsWith("-"))
+      : undefined
+    return help(command, subcommand)
+  }
   if (command === "new") return commandNew(args)
   if (command === "setup") return commandSetup(args)
   if (command === "list") return commandList(args)

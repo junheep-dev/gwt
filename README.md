@@ -157,6 +157,10 @@ gwt config show
 gwt shell install zsh [--dry-run] [--yes]
 ```
 
+Run `gwt --help` for the command overview, or `gwt <command> --help` for
+behavior, options, and practical examples. Nested commands such as
+`gwt config create --help` have their own help as well.
+
 `gwt new` creates `scratch/<id>` when no branch is provided. The immutable ID,
 assigned ports, and setup status are stored under the repository's common Git
 directory at `.git/gwt/worktrees/`.

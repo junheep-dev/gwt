@@ -25,9 +25,51 @@ confirmation. The integration also provides Zsh completion for commands,
 options, worktrees, and Git refs. It only changes directories; it does not load
 environment variables or run project hooks.
 
-## Project configuration
+## Configuration
 
-Commit an optional `.worktree.json` at the repository root:
+Create user configuration for the current repository:
+
+```sh
+gwt config create
+```
+
+This adds a project entry to `~/.config/gwt/config.json`, or
+`$XDG_CONFIG_HOME/gwt/config.json` when `XDG_CONFIG_HOME` is set. Projects use
+the primary remote as their identifier, such as `github.com/owner/repository`.
+Repositories without a remote use their canonical path.
+
+```json
+{
+  "projects": {
+    "github.com/owner/repository": {
+      "worktreeDirectory": ".worktrees",
+      "copyFiles": [
+        "apps/server/.env",
+        "apps/web/.env"
+      ],
+      "ports": [
+        "WEB_PORT",
+        "SERVER_PORT"
+      ],
+      "postCreate": "./scripts/worktree-setup",
+      "preRemove": "./scripts/worktree-cleanup"
+    }
+  }
+}
+```
+
+User configuration is the default and does not change the repository. If
+the setup should be committed and shared, create `<repository>/.gwt.json`
+instead:
+
+```sh
+gwt config create --project
+```
+
+If user configuration exists for the repository, it is copied into the
+new project file so it can be committed directly. Otherwise, the command
+creates a default scaffold. The project file contains the configuration fields
+directly:
 
 ```json
 {
@@ -46,7 +88,12 @@ Commit an optional `.worktree.json` at the repository root:
 }
 ```
 
-All fields are optional. Without a config, worktrees are created beneath
+When `.gwt.json` exists, it takes precedence over the user project entry.
+The two files are not merged. Run `gwt config show` to see whether user and
+repository configuration is available, the location of each existing config
+file, the active source, and its resolved value.
+
+All fields are optional. Without either config, worktrees are created beneath
 `.worktrees`, use the primary worktree's current commit as their base, and run
 no setup actions.
 
@@ -85,13 +132,15 @@ printf 'PORT=%s\n' "$SERVER_PORT" >> apps/server/.env
 pnpm install --frozen-lockfile
 ```
 
-Project hooks require explicit trust because they execute repository code:
+Hooks in user config are trusted because the user added them directly.
+Hooks from a committed `.gwt.json` require explicit trust because they execute
+repository code:
 
 ```sh
 gwt trust
 ```
 
-Approval is invalidated when `.worktree.json` or either hook changes.
+Approval is invalidated when `.gwt.json` or either hook changes.
 
 ## Commands
 
@@ -103,6 +152,8 @@ gwt switch [id|branch|path]
 gwt info [id|branch|path]
 gwt remove [id|branch|path] [--keep-branch|--discard] [--yes] [--no-hooks]
 gwt trust [--revoke]
+gwt config create [--project]
+gwt config show
 gwt shell install zsh [--dry-run] [--yes]
 ```
 

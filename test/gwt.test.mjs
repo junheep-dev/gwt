@@ -53,9 +53,16 @@ function gwt(fixture, args, options = {}) {
 }
 
 function writeConfig(repository, value) {
-  writeFileSync(join(repository, ".worktree.json"), `${JSON.stringify(value, null, 2)}\n`)
-  git(repository, "add", ".worktree.json")
+  writeFileSync(join(repository, ".gwt.json"), `${JSON.stringify(value, null, 2)}\n`)
+  git(repository, "add", ".gwt.json")
   git(repository, "commit", "-m", "Add worktree config")
+}
+
+function writeUserConfig(fixture, value, identifier = realpathSync(fixture.repository)) {
+  const path = join(fixture.configHome, "gwt", "config.json")
+  mkdirSync(join(fixture.configHome, "gwt"), { recursive: true })
+  writeFileSync(path, `${JSON.stringify({ projects: { [identifier]: value } }, null, 2)}\n`)
+  return path
 }
 
 function metadataFiles(repository) {
@@ -86,6 +93,105 @@ describe("configuration", () => {
     const result = gwt(fixture, ["new"])
     assert.equal(result.status, 1)
     assert.match(result.stderr, /cannot contain '\.\.'/)
+  })
+
+  test("creates and shows user configuration using the remote identifier", () => {
+    const fixture = createRepository()
+    git(fixture.repository, "remote", "add", "origin", "git@github.com:example/project.git")
+
+    const empty = gwt(fixture, ["config", "show"])
+    assert.equal(empty.status, 0, empty.stderr)
+    assert.match(empty.stdout, /User config: not created/)
+    assert.match(empty.stdout, /Repository config: not created/)
+    assert.doesNotMatch(empty.stdout, /\n  File:/)
+
+    const created = gwt(fixture, ["config", "create"])
+    assert.equal(created.status, 0, created.stderr)
+    const path = join(fixture.configHome, "gwt", "config.json")
+    const config = JSON.parse(readFileSync(path, "utf8"))
+    assert.deepEqual(config.projects["github.com/example/project"], {
+      worktreeDirectory: ".worktrees",
+      copyFiles: [],
+      ports: [],
+    })
+
+    const shown = gwt(fixture, ["config", "show"])
+    assert.equal(shown.status, 0, shown.stderr)
+    assert.match(shown.stdout, /Project: github\.com\/example\/project/)
+    assert.match(shown.stdout, /User config: configured/)
+    assert.match(shown.stdout, /File: .*config\.json/)
+    assert.match(shown.stdout, /Repository config: not created/)
+    assert.match(shown.stdout, /Active config: user/)
+
+    const repeated = gwt(fixture, ["config", "create"])
+    assert.equal(repeated.status, 1)
+    assert.match(repeated.stderr, /already contains project/)
+  })
+
+  test("distinguishes a missing user project from a missing config file", () => {
+    const fixture = createRepository()
+    writeUserConfig(fixture, {}, "/another/repository")
+
+    const shown = gwt(fixture, ["config", "show"])
+    assert.equal(shown.status, 0, shown.stderr)
+    assert.match(shown.stdout, /User config: project not configured/)
+    assert.match(shown.stdout, /File: .*config\.json/)
+    assert.match(shown.stdout, /Active config: built-in defaults/)
+  })
+
+  test("uses user config by default and project config when present", () => {
+    const fixture = createRepository()
+    writeUserConfig(fixture, { ports: ["USER_PORT"] })
+
+    const userWorktree = gwt(fixture, ["new", "feature/user-config"])
+    assert.equal(userWorktree.status, 0, userWorktree.stderr)
+    const userMetadata = JSON.parse(readFileSync(metadataFiles(fixture.repository)[0], "utf8"))
+    assert.ok(Number.isInteger(userMetadata.ports.USER_PORT))
+    assert.equal(gwt(fixture, ["remove", userMetadata.id]).status, 0)
+
+    writeConfig(fixture.repository, { ports: ["PROJECT_PORT"] })
+    const projectWorktree = gwt(fixture, ["new", "feature/project-config"])
+    assert.equal(projectWorktree.status, 0, projectWorktree.stderr)
+    const projectMetadata = JSON.parse(readFileSync(metadataFiles(fixture.repository)[0], "utf8"))
+    assert.ok(Number.isInteger(projectMetadata.ports.PROJECT_PORT))
+    assert.equal(projectMetadata.ports.USER_PORT, undefined)
+
+    const shown = gwt(fixture, ["config", "show"])
+    assert.match(shown.stdout, /User config: configured/)
+    assert.match(shown.stdout, /Repository config: configured/)
+    assert.match(shown.stdout, /Active config: repository/)
+  })
+
+  test("creates a commit-ready project config", () => {
+    const fixture = createRepository()
+    writeUserConfig(fixture, { ports: ["APP_PORT"], copyFiles: [".env"] })
+    const created = gwt(fixture, ["config", "create", "--project"])
+    assert.equal(created.status, 0, created.stderr)
+    const path = join(fixture.repository, ".gwt.json")
+    assert.equal(existsSync(path), true)
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), {
+      worktreeDirectory: ".worktrees",
+      copyFiles: [".env"],
+      ports: ["APP_PORT"],
+    })
+    assert.match(git(fixture.repository, "status", "--short"), /\?\? \.gwt\.json/)
+  })
+
+  test("trusts hooks from user config without project approval", () => {
+    const fixture = createRepository()
+    mkdirSync(join(fixture.repository, "scripts"), { recursive: true })
+    const hook = join(fixture.repository, "scripts", "setup")
+    writeFileSync(hook, "#!/bin/sh\nprintf 'ran\\n' > user-hook-result\n")
+    chmodSync(hook, 0o755)
+    git(fixture.repository, "add", "scripts/setup")
+    git(fixture.repository, "commit", "-m", "Add setup hook")
+    writeUserConfig(fixture, { postCreate: "scripts/setup" })
+
+    const created = gwt(fixture, ["new", "feature/user-hook"])
+    assert.equal(created.status, 0, created.stderr)
+    const metadata = JSON.parse(readFileSync(metadataFiles(fixture.repository)[0], "utf8"))
+    assert.equal(readFileSync(join(metadata.path, "user-hook-result"), "utf8"), "ran\n")
+    assert.equal(existsSync(join(fixture.configHome, "gwt", "approvals.json")), false)
   })
 })
 

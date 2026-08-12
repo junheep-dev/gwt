@@ -24,10 +24,11 @@ import { emitKeypressEvents } from "node:readline"
 import { createInterface } from "node:readline/promises"
 
 const VERSION = "0.1.0"
-const CONFIG_FILE = ".worktree.json"
+const PROJECT_CONFIG_FILE = ".gwt.json"
 const PORT_MIN = 20_000
 const PORT_MAX = 39_999
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
+const DEFAULT_CONFIG = { worktreeDirectory: ".worktrees", copyFiles: [], ports: [] }
 
 class CliError extends Error {}
 
@@ -122,28 +123,11 @@ function validateRelativePath(value, field) {
   return value
 }
 
-function loadConfig(primaryPath) {
-  const path = join(primaryPath, CONFIG_FILE)
-  if (!existsSync(path)) {
-    return {
-      raw: "",
-      path,
-      value: { worktreeDirectory: ".worktrees", copyFiles: [], ports: [] },
-    }
-  }
-
-  const raw = readFileSync(path, "utf8")
-  let parsed
-  try {
-    parsed = JSON.parse(raw)
-  } catch (error) {
-    throw new CliError(`${CONFIG_FILE} is not valid JSON: ${error.message}`)
-  }
-
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new CliError(`${CONFIG_FILE} must contain an object`)
+function validateConfig(parsed, label) {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new CliError(`${label} must contain an object`)
   const allowed = new Set(["base", "worktreeDirectory", "copyFiles", "ports", "postCreate", "preRemove"])
   for (const key of Object.keys(parsed)) {
-    if (!allowed.has(key)) throw new CliError(`${CONFIG_FILE} contains an unknown field: ${key}`)
+    if (!allowed.has(key)) throw new CliError(`${label} contains an unknown field: ${key}`)
   }
 
   if (parsed.base !== undefined && (typeof parsed.base !== "string" || parsed.base.length === 0)) {
@@ -171,9 +155,104 @@ function loadConfig(primaryPath) {
   }
 
   return {
-    raw,
-    path,
-    value: { ...parsed, worktreeDirectory, copyFiles, ports },
+    ...parsed,
+    worktreeDirectory,
+    copyFiles,
+    ports,
+  }
+}
+
+function configHome() {
+  return process.env.XDG_CONFIG_HOME || join(homedir(), ".config")
+}
+
+function userConfigPath() {
+  return join(configHome(), "gwt", "config.json")
+}
+
+function projectConfigPath(repository) {
+  return join(repository.primaryPath, PROJECT_CONFIG_FILE)
+}
+
+function projectIdentifier(repository) {
+  const remotes = git(["remote"], repository.primaryPath).stdout.trim().split("\n").filter(Boolean)
+  const remote = remotes.includes("origin") ? "origin" : remotes[0]
+  if (!remote) return repository.primaryPath
+
+  const url = gitOutput(["remote", "get-url", remote], repository.primaryPath)
+  const scp = url.includes("://") ? null : url.match(/^(?:[^@]+@)?([^:]+):(.+)$/)
+  if (scp) return `${scp[1].toLowerCase()}/${scp[2].replace(/^\/+|\/+$/g, "").replace(/\.git$/, "")}`
+
+  try {
+    const parsed = new URL(url)
+    if (parsed.host && parsed.pathname) {
+      return `${parsed.host.toLowerCase()}/${parsed.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "")}`
+    }
+  } catch {}
+
+  return repository.primaryPath
+}
+
+function readUserConfig() {
+  const path = userConfigPath()
+  if (!existsSync(path)) return { path, raw: "", value: { projects: {} } }
+  const raw = readFileSync(path, "utf8")
+  let value
+  try {
+    value = JSON.parse(raw)
+  } catch (error) {
+    throw new CliError(`${path} is not valid JSON: ${error.message}`)
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new CliError(`${path} must contain an object`)
+  for (const key of Object.keys(value)) {
+    if (key !== "projects") throw new CliError(`${path} contains an unknown field: ${key}`)
+  }
+  if (value.projects !== undefined && (!value.projects || typeof value.projects !== "object" || Array.isArray(value.projects))) {
+    throw new CliError(`${path} projects must contain an object`)
+  }
+  return { path, raw, value: { ...value, projects: value.projects ?? {} } }
+}
+
+function loadConfig(repository) {
+  const projectPath = projectConfigPath(repository)
+  if (existsSync(projectPath)) {
+    const raw = readFileSync(projectPath, "utf8")
+    let parsed
+    try {
+      parsed = JSON.parse(raw)
+    } catch (error) {
+      throw new CliError(`${PROJECT_CONFIG_FILE} is not valid JSON: ${error.message}`)
+    }
+    return {
+      source: "project",
+      requiresTrust: true,
+      raw,
+      path: projectPath,
+      value: validateConfig(parsed, PROJECT_CONFIG_FILE),
+    }
+  }
+
+  const user = readUserConfig()
+  const identifier = projectIdentifier(repository)
+  if (Object.hasOwn(user.value.projects, identifier)) {
+    const parsed = user.value.projects[identifier]
+    return {
+      source: "user",
+      requiresTrust: false,
+      raw: `${JSON.stringify(parsed)}\n`,
+      path: user.path,
+      identifier,
+      value: validateConfig(parsed, `projects[${JSON.stringify(identifier)}]`),
+    }
+  }
+
+  return {
+    source: "default",
+    requiresTrust: false,
+    raw: "",
+    path: null,
+    identifier,
+    value: { ...DEFAULT_CONFIG },
   }
 }
 
@@ -193,10 +272,10 @@ function readJson(path) {
   }
 }
 
-function writeJson(path, value) {
+function writeJson(path, value, mode = 0o600) {
   mkdirSync(dirname(path), { recursive: true })
   const temporaryPath = `${path}.${process.pid}.tmp`
-  writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
+  writeFileSync(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, { mode })
   renameSync(temporaryPath, path)
 }
 
@@ -376,6 +455,7 @@ async function ask(question) {
 }
 
 async function ensureTrusted(repository, configDocument, worktreePath) {
+  if (!configDocument.requiresTrust) return
   const fingerprint = trustFingerprint(repository, configDocument, worktreePath)
   if (!fingerprint || isTrusted(repository, fingerprint)) return
 
@@ -535,7 +615,7 @@ async function commandNew(args) {
   const { options, positionals } = parseOptions(args, { "--base": "value", "--no-hooks": "boolean" })
   if (positionals.length > 1) throw new CliError("Usage: gwt new [branch] [--base <ref>] [--no-hooks]")
   const repository = discoverRepository()
-  const configDocument = loadConfig(repository.primaryPath)
+  const configDocument = loadConfig(repository)
   ensureCopySources(repository, configDocument.value)
   const id = generateId(repository, configDocument.value)
   const branch = positionals[0] ?? `scratch/${id}`
@@ -761,7 +841,7 @@ async function commandSetup(args) {
   const { options, positionals } = parseOptions(args, { "--no-hooks": "boolean" })
   if (positionals.length > 1) throw new CliError("Usage: gwt setup [id|branch|path] [--no-hooks]")
   const repository = discoverRepository()
-  const configDocument = loadConfig(repository.primaryPath)
+  const configDocument = loadConfig(repository)
   const worktree = resolveWorktree(repository, positionals[0])
   const metadata = await setupWorktree(repository, configDocument, worktree, { noHooks: options["no-hooks"] })
   console.log(`Setup ${metadata.setup}: ${metadata.id}`)
@@ -793,7 +873,7 @@ async function commandRemove(args) {
   const wasCurrent = currentWorktree(repository)?.path === worktree.path
 
   if (!options["no-hooks"]) {
-    const configDocument = loadConfig(repository.primaryPath)
+    const configDocument = loadConfig(repository)
     await ensureTrusted(repository, configDocument, targetPath)
     runHook("preRemove", repository, configDocument, worktree, metadata)
   }
@@ -826,7 +906,13 @@ function commandTrust(args) {
     return
   }
   const current = currentWorktree(repository)
-  const configDocument = loadConfig(repository.primaryPath)
+  const configDocument = loadConfig(repository)
+  if (!configDocument.requiresTrust) {
+    console.log(configDocument.source === "user"
+      ? "User config hooks are trusted automatically"
+      : "This repository has no project config to approve")
+    return
+  }
   const fingerprint = trustFingerprint(repository, configDocument, canonical(current.path))
   if (!fingerprint) {
     console.log("This repository has no project hooks to approve")
@@ -834,6 +920,65 @@ function commandTrust(args) {
   }
   saveTrust(repository, fingerprint)
   console.log(`Trusted project hooks for ${repository.primaryPath}`)
+}
+
+function configScaffold() {
+  return { worktreeDirectory: ".worktrees", copyFiles: [], ports: [] }
+}
+
+function commandConfigCreate(args) {
+  const { options, positionals } = parseOptions(args, { "--project": "boolean" })
+  if (positionals.length > 0) throw new CliError("Usage: gwt config create [--project]")
+  const repository = discoverRepository()
+
+  if (options.project) {
+    const path = projectConfigPath(repository)
+    if (existsSync(path)) throw new CliError(`Project config already exists: ${path}`)
+    const active = loadConfig(repository)
+    writeJson(path, active.source === "user" ? active.value : configScaffold(), 0o644)
+    console.log(`Created project config: ${path}`)
+    return
+  }
+
+  const user = readUserConfig()
+  const identifier = projectIdentifier(repository)
+  if (Object.hasOwn(user.value.projects, identifier)) {
+    throw new CliError(`User config already contains project: ${identifier}`)
+  }
+  user.value.projects[identifier] = configScaffold()
+  writeJson(user.path, user.value)
+  console.log(`Created user config for ${identifier}: ${user.path}`)
+}
+
+function commandConfigShow(args) {
+  if (args.length > 0) throw new CliError("Usage: gwt config show")
+  const repository = discoverRepository()
+  const identifier = projectIdentifier(repository)
+  const user = readUserConfig()
+  const projectPath = projectConfigPath(repository)
+  const active = loadConfig(repository)
+  const userFileExists = existsSync(user.path)
+  const userConfigured = Object.hasOwn(user.value.projects, identifier)
+  const activeLabel = active.source === "user"
+    ? "user"
+    : active.source === "project"
+      ? "repository"
+      : "built-in defaults"
+
+  console.log(`Project: ${identifier}`)
+  console.log(`User config: ${userConfigured ? "configured" : userFileExists ? "project not configured" : "not created"}`)
+  if (userFileExists) console.log(`  File: ${user.path}`)
+  const repositoryConfigured = existsSync(projectPath)
+  console.log(`Repository config: ${repositoryConfigured ? "configured" : "not created"}`)
+  if (repositoryConfigured) console.log(`  File: ${projectPath}`)
+  console.log(`Active config: ${activeLabel}`)
+  console.log(JSON.stringify(active.value, null, 2))
+}
+
+function commandConfig(args) {
+  if (args[0] === "create") return commandConfigCreate(args.slice(1))
+  if (args[0] === "show") return commandConfigShow(args.slice(1))
+  throw new CliError("Usage: gwt config <create [--project]|show>")
 }
 
 function zshIntegration() {
@@ -872,6 +1017,7 @@ if command -v gwt >/dev/null 2>&1; then
       'info:Show worktree details'
       'remove:Remove a worktree'
       'trust:Approve project hooks'
+      'config:Manage user and project configuration'
       'shell:Install shell integration'
     )
 
@@ -908,6 +1054,11 @@ if command -v gwt >/dev/null 2>&1; then
         ;;
       trust)
         _arguments '--revoke[revoke project hook approval]'
+        ;;
+      config)
+        _arguments \
+          '2:action:(create show)' \
+          '--project[create a config in the repository]'
         ;;
       shell)
         _arguments \
@@ -1005,9 +1156,12 @@ Usage:
   gwt info [id|branch|path]
   gwt remove [id|branch|path] [--keep-branch|--discard] [--yes] [--no-hooks]
   gwt trust [--revoke]
+  gwt config create [--project]
+  gwt config show
   gwt shell install zsh [--dry-run] [--yes]
 
-Project configuration: ${CONFIG_FILE}`)
+User configuration: ${userConfigPath()}
+Project configuration: ${PROJECT_CONFIG_FILE}`)
 }
 
 async function main() {
@@ -1021,6 +1175,7 @@ async function main() {
   if (command === "info") return commandInfo(args)
   if (command === "remove") return commandRemove(args)
   if (command === "trust") return commandTrust(args)
+  if (command === "config") return commandConfig(args)
   if (command === "shell") return commandShell(args)
   if (command === "__complete") return commandComplete(args)
   throw new CliError(`Unknown command: ${command}`)

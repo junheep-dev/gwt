@@ -23,7 +23,6 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { emitKeypressEvents } from "node:readline"
 import { createInterface } from "node:readline/promises"
 
-const VERSION = "0.1.0"
 const PROJECT_CONFIG_FILE = ".gwt.json"
 const PORT_MIN = 20_000
 const PORT_MAX = 39_999
@@ -1309,10 +1308,15 @@ function commandComplete(args) {
   throw new CliError("Invalid completion request")
 }
 
+function version() {
+  const path = join(import.meta.dirname, "..", "package.json")
+  return JSON.parse(readFileSync(path, "utf8")).version
+}
+
 function help(command, subcommand) {
   const topic = [command, subcommand].filter(Boolean).join(" ")
   const texts = {
-    "": `gwt ${VERSION} - lightweight native Git worktree workflows
+    "": `gwt ${version()} - lightweight native Git worktree workflows
 
 Usage:
   gwt <command> [options]
@@ -1614,7 +1618,7 @@ async function main() {
   const [command, ...args] = process.argv.slice(2)
   if (!command || command === "--help" || command === "-h") return help()
   if (command === "help") return help(args[0], args[1])
-  if (command === "--version" || command === "-V") return console.log(VERSION)
+  if (command === "--version" || command === "-V") return console.log(version())
   if (args.includes("--help") || args.includes("-h")) {
     const subcommand = ["config", "shell", "skill"].includes(command)
       ? args.find((argument) => !argument.startsWith("-"))

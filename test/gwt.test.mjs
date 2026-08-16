@@ -95,6 +95,16 @@ describe("help", () => {
     assert.match(newHelp.stdout, /Examples:/)
   })
 
+  test("reports the packaged version", () => {
+    const fixture = createRepository()
+    const { version } = JSON.parse(readFileSync(resolve(import.meta.dirname, "../package.json"), "utf8"))
+
+    const reported = gwt(fixture, ["--version"])
+    assert.equal(reported.status, 0, reported.stderr)
+    assert.equal(reported.stdout.trim(), version)
+    assert.match(gwt(fixture, []).stdout, new RegExp(`^gwt ${version} `))
+  })
+
   test("supports help for nested and common commands", () => {
     const fixture = createRepository()
 

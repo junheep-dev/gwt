@@ -464,6 +464,61 @@ describe("shell integration", () => {
     assert.doesNotMatch(help.stdout, /gwt shell init zsh/)
   })
 
+  test("installs the agent skill for the user and the repository", () => {
+    const fixture = createRepository()
+    const home = join(fixture.root, "home")
+    mkdirSync(home)
+    const env = { ...fixture.env, HOME: home }
+    const userSkill = join(home, ".claude", "skills", "gwt", "SKILL.md")
+    const install = (...args) => run(process.execPath, [cli, "skill", "install", "claude", ...args], {
+      cwd: fixture.repository,
+      env,
+    })
+
+    const dryRun = install("--dry-run")
+    assert.equal(dryRun.status, 0, dryRun.stderr)
+    assert.equal(existsSync(userSkill), false)
+    assert.match(dryRun.stdout, /^name: gwt$/m)
+
+    const installed = install("--yes")
+    assert.equal(installed.status, 0, installed.stderr)
+    const contents = readFileSync(userSkill, "utf8")
+    assert.match(contents, /^name: gwt$/m)
+    assert.match(contents, /gwt new/)
+
+    const repeated = install("--yes")
+    assert.equal(repeated.status, 0, repeated.stderr)
+    assert.match(repeated.stdout, /already installed/)
+
+    writeFileSync(userSkill, `${contents}edited\n`)
+    const replaced = install("--yes")
+    assert.equal(replaced.status, 0, replaced.stderr)
+    assert.match(replaced.stdout, /^Replace /m)
+    assert.equal(readFileSync(userSkill, "utf8"), contents)
+
+    const project = install("--project", "--yes")
+    assert.equal(project.status, 0, project.stderr)
+    assert.equal(readFileSync(join(fixture.repository, ".claude", "skills", "gwt", "SKILL.md"), "utf8"), contents)
+
+    const codex = run(process.execPath, [cli, "skill", "install", "codex", "--yes"], {
+      cwd: fixture.repository,
+      env,
+    })
+    assert.equal(codex.status, 0, codex.stderr)
+    assert.equal(readFileSync(join(home, ".agents", "skills", "gwt", "SKILL.md"), "utf8"), contents)
+
+    const codexProject = run(process.execPath, [cli, "skill", "install", "codex", "--project", "--yes"], {
+      cwd: fixture.repository,
+      env,
+    })
+    assert.equal(codexProject.status, 0, codexProject.stderr)
+    assert.equal(readFileSync(join(fixture.repository, ".agents", "skills", "gwt", "SKILL.md"), "utf8"), contents)
+
+    const unknown = run(process.execPath, [cli, "skill", "install", "cursor"], { cwd: fixture.repository, env })
+    assert.equal(unknown.status, 1)
+    assert.match(unknown.stderr, /gwt skill install <claude\|codex>/)
+  })
+
   test("registers zsh completion and returns repository-aware candidates", () => {
     const fixture = createRepository()
     assert.equal(gwt(fixture, ["new", "feature/completion"]).status, 0)

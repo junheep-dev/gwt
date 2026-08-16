@@ -29,6 +29,8 @@ const PORT_MIN = 20_000
 const PORT_MAX = 39_999
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 const DEFAULT_CONFIG = { worktreeDirectory: ".worktrees", copyFiles: [], ports: [] }
+const SKILL_DIRECTORIES = { claude: ".claude", codex: ".agents" }
+const SKILL_USAGE = `Usage: gwt skill install <${Object.keys(SKILL_DIRECTORIES).join("|")}> [--project] [--dry-run] [--yes]`
 
 class CliError extends Error {}
 
@@ -1076,6 +1078,7 @@ if command -v gwt >/dev/null 2>&1; then
       'trust:Approve project hooks'
       'config:Manage user and project configuration'
       'shell:Install shell integration'
+      'skill:Install the gwt skill for coding agents'
     )
 
     if (( CURRENT == 2 )); then
@@ -1133,6 +1136,15 @@ if command -v gwt >/dev/null 2>&1; then
           '--yes[skip installation confirmation]' \
           '(-h --help)'{-h,--help}'[show help]'
         ;;
+      skill)
+        _arguments \
+          '2:action:(install)' \
+          '3:agent:(claude codex)' \
+          '--project[install into the repository instead of the home directory]' \
+          '--dry-run[show the change without writing]' \
+          '--yes[skip installation confirmation]' \
+          '(-h --help)'{-h,--help}'[show help]'
+        ;;
     esac
   }
 
@@ -1140,6 +1152,92 @@ if command -v gwt >/dev/null 2>&1; then
     compdef _gwt gwt
   fi
 fi`
+}
+
+function agentSkill() {
+  return `---
+name: gwt
+description: Use gwt to create, list, switch, and remove Git worktrees. Use whenever a task needs an isolated worktree, or in place of running 'git worktree' directly.
+---
+
+gwt wraps native Git worktrees and prepares each one with the project's local
+files, assigned ports, and setup hooks.
+
+## Prefer gwt over 'git worktree'
+
+Create worktrees with \`gwt new\`, not \`git worktree add\`. A worktree added with
+plain Git skips the configured file copies, port assignment, and postCreate
+hook, and records no gwt metadata, so \`gwt list\` and \`gwt remove\` cannot manage
+it. Adopt an existing one with \`gwt setup <path>\`.
+
+## Read the help instead of guessing flags
+
+\`gwt --help\` lists the commands, \`gwt <command> --help\` documents arguments,
+options, and behavior, and nested commands such as \`gwt config create --help\`
+have their own help. This skill does not repeat command signatures so that they
+stay accurate across versions.
+
+## What the help does not make obvious
+
+- Hooks declared by a committed \`.gwt.json\` do not run until the repository is
+  approved with \`gwt trust\`. Approval is invalidated whenever the config or a
+  hook changes, so a repository that worked before can start asking again.
+- A failed setup keeps the worktree and records the failure. Retry it with
+  \`gwt setup <id>\` rather than removing and recreating the worktree.
+- Ports are assigned per worktree. Read them from \`gwt info\` instead of assuming
+  a project default; two worktrees of the same project never share a port.
+- \`gwt switch\` changes the shell's directory only when the shell integration is
+  installed. Otherwise it just prints the path.
+- \`gwt switch\` with no target opens an interactive picker, so always pass an
+  explicit target when running non-interactively.
+
+## Removal is destructive
+
+\`gwt remove\` deletes the worktree and, by default, its branch. Confirm with the
+user before running it, and never pass \`--discard --yes\` on your own: together
+they discard uncommitted changes and force-delete an unmerged branch.
+`
+}
+
+function skillPath(agent, project) {
+  const base = project ? discoverRepository().primaryPath : homedir()
+  return join(base, SKILL_DIRECTORIES[agent], "skills", "gwt", "SKILL.md")
+}
+
+async function installSkill(agent, args) {
+  const { options, positionals } = parseOptions(args, {
+    "--project": "boolean",
+    "--dry-run": "boolean",
+    "--yes": "boolean",
+  })
+  if (positionals.length > 0) throw new CliError(SKILL_USAGE)
+
+  const path = skillPath(agent, options.project)
+  const contents = agentSkill()
+  const existing = existsSync(path) ? readFileSync(path, "utf8") : null
+  if (existing === contents) {
+    console.log(`Skill is already installed in ${path}`)
+    return
+  }
+
+  const verb = existing === null ? "Create" : "Replace"
+  console.log(`${verb} ${path}`)
+  if (options["dry-run"]) {
+    console.log(`\n${contents}`)
+    return
+  }
+  if (!options.yes && !(await ask(`${verb}? [y/N] `))) throw new CliError("Skill installation cancelled")
+
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, contents)
+  console.log(`Installed skill in ${path}`)
+}
+
+async function commandSkill(args) {
+  if (args[0] === "install" && Object.hasOwn(SKILL_DIRECTORIES, args[1])) {
+    return installSkill(args[1], args.slice(2))
+  }
+  throw new CliError(SKILL_USAGE)
 }
 
 function zshConfigPath() {
@@ -1229,6 +1327,7 @@ Commands:
   trust     Approve or revoke repository project hooks
   config    Create or inspect configuration
   shell     Install shell integration
+  skill     Install the gwt skill for coding agents
 
 Options:
   -h, --help      Show help.
@@ -1240,6 +1339,7 @@ Examples:
   gwt remove
   gwt config create
   gwt shell install zsh
+  gwt skill install claude
 
 Run 'gwt <command> --help' for command behavior and more examples.`,
     new: `Create a worktree, prepare its development environment, and switch to it.
@@ -1460,6 +1560,50 @@ when ZDOTDIR is set. Restart Zsh or source the file after installation.
 Examples:
   gwt shell install zsh
   gwt shell install zsh --dry-run`,
+    skill: `Install the gwt skill so coding agents use gwt correctly.
+
+Usage:
+  gwt skill install <claude|codex> [--project] [--dry-run] [--yes]
+
+Options:
+  -h, --help      Show help for this command.
+
+The skill teaches an agent to prefer gwt over native 'git worktree', to read
+'gwt <command> --help' for command details, and to treat removal as
+destructive. It does not duplicate command signatures, so it stays accurate
+as gwt changes.
+
+Examples:
+  gwt skill install claude
+  gwt skill install codex`,
+    "skill install": `Install the gwt skill for a coding agent.
+
+Usage:
+  gwt skill install <claude|codex> [--project] [--dry-run] [--yes]
+
+Arguments:
+  claude          Install for Claude Code, under .claude/skills.
+  codex           Install for Codex, under .agents/skills.
+
+Options:
+  --project       Write the skill inside the primary worktree, so it can be
+                  committed for the team, instead of the home directory.
+  --dry-run       Print the target path and the skill without writing it.
+  --yes           Install without asking for confirmation.
+  -h, --help      Show help for this command.
+
+Both agents read the same SKILL.md format and only differ in location, so the
+installed skill is identical. Install it once per agent.
+
+Reinstall after upgrading gwt to pick up a revised skill. The command reports
+an unchanged file as already installed and asks before replacing a modified
+one.
+
+Examples:
+  gwt skill install claude
+  gwt skill install codex
+  gwt skill install codex --project
+  gwt skill install claude --dry-run`,
   }
 
   if (!Object.hasOwn(texts, topic)) throw new CliError(`Unknown help topic: ${topic}`)
@@ -1472,7 +1616,7 @@ async function main() {
   if (command === "help") return help(args[0], args[1])
   if (command === "--version" || command === "-V") return console.log(VERSION)
   if (args.includes("--help") || args.includes("-h")) {
-    const subcommand = ["config", "shell"].includes(command)
+    const subcommand = ["config", "shell", "skill"].includes(command)
       ? args.find((argument) => !argument.startsWith("-"))
       : undefined
     return help(command, subcommand)
@@ -1486,6 +1630,7 @@ async function main() {
   if (command === "trust") return commandTrust(args)
   if (command === "config") return commandConfig(args)
   if (command === "shell") return commandShell(args)
+  if (command === "skill") return commandSkill(args)
   if (command === "__complete") return commandComplete(args)
   throw new CliError(`Unknown command: ${command}`)
 }

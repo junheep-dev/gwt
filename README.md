@@ -33,6 +33,38 @@ confirmation. The integration also provides Zsh completion for commands,
 options, worktrees, and Git refs. It only changes directories; it does not load
 environment variables or run project hooks.
 
+## Coding agents
+
+Coding agents do not know about `gwt` and reach for `git worktree add`, which
+skips the copied files, assigned ports, and setup hooks. Install a skill that
+tells them otherwise:
+
+```sh
+gwt skill install claude
+gwt skill install codex
+```
+
+The installer shows the target path and asks for confirmation before writing.
+Both agents read the same `SKILL.md` format and differ only in location, so
+the installed skill is identical:
+
+| Agent  | Default                        | With `--project`             |
+| ------ | ------------------------------ | ---------------------------- |
+| Claude | `~/.claude/skills/gwt/SKILL.md` | `.claude/skills/gwt/SKILL.md` |
+| Codex  | `~/.agents/skills/gwt/SKILL.md` | `.agents/skills/gwt/SKILL.md` |
+
+`--project` writes into the primary worktree so the skill can be committed for
+the team.
+
+The skill covers what `gwt --help` does not: that gwt is preferred over native
+`git worktree`, that project hooks need `gwt trust`, that a failed setup is
+retried rather than recreated, that ports come from `gwt info`, and that
+removal is destructive. It points at `gwt <command> --help` for command
+details instead of repeating them, so it does not go stale as gwt changes.
+Reinstall after upgrading to pick up a revised skill; an unchanged file is
+reported as already installed, and a modified one is replaced only after
+confirmation.
+
 ## Configuration
 
 Create user configuration for the current repository:
@@ -167,6 +199,7 @@ gwt trust [--revoke]
 gwt config create [--project]
 gwt config show
 gwt shell install zsh [--dry-run] [--yes]
+gwt skill install <claude|codex> [--project] [--dry-run] [--yes]
 ```
 
 Run `gwt --help` for the command overview, or `gwt <command> --help` for

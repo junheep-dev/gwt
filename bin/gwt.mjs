@@ -26,6 +26,7 @@ import { createInterface } from "node:readline/promises"
 const PROJECT_CONFIG_FILE = ".gwt.json"
 const PORT_MIN = 20_000
 const PORT_MAX = 39_999
+const PICKER_ESCAPE_CODE_TIMEOUT_MS = 50
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 const DEFAULT_CONFIG = { worktreeDirectory: ".worktrees", copyFiles: [], ports: [] }
 const SKILL_DIRECTORIES = { claude: ".claude", codex: ".agents" }
@@ -655,17 +656,35 @@ async function commandNew(args) {
   }
 }
 
-async function chooseWorktree(repository) {
-  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new CliError("A worktree selector is required in non-interactive mode")
+function linkedWorktreeRows(repository, metadata = loadMetadata(repository)) {
   const current = currentWorktree(repository)
-  const choices = repository.worktrees.map((worktree, index) => {
-    const metadata = metadataForWorktree(repository, worktree)
-    const relativePath = relative(repository.primaryPath, worktree.path)
+  return repository.worktrees.map((worktree, index) => {
+    const item = metadata.find((entry) => resolve(entry.path) === resolve(worktree.path))
     return {
       worktree,
-      current: resolve(current?.path ?? "") === resolve(worktree.path),
+      current: current && resolve(current.path) === resolve(worktree.path),
+      id: item?.id ?? (index === 0 ? "primary" : "-"),
       branch: worktree.branch ?? "(detached)",
-      id: metadata?.id ?? (index === 0 ? "primary" : "native"),
+      setup: item?.setup ?? (index === 0 ? "-" : "unmanaged"),
+      path: worktree.path,
+    }
+  })
+}
+
+function terminalColors() {
+  if (!process.stdout.isTTY || process.env.NO_COLOR !== undefined) {
+    return { cyan: "", yellow: "", dim: "", reset: "" }
+  }
+  return { cyan: "\x1b[36m", yellow: "\x1b[33m", dim: "\x1b[2m", reset: "\x1b[0m" }
+}
+
+async function chooseWorktree(repository) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new CliError("A worktree selector is required in non-interactive mode")
+  const choices = linkedWorktreeRows(repository).map((row) => {
+    const { worktree } = row
+    const relativePath = relative(repository.primaryPath, worktree.path)
+    return {
+      ...row,
       path: relativePath === "" ? "." : relativePath.startsWith(`..${sep}`) ? worktree.path : relativePath,
     }
   })
@@ -673,12 +692,11 @@ async function chooseWorktree(repository) {
   return new Promise((resolveChoice, rejectChoice) => {
     let query = ""
     let filtering = false
-    let selected = Math.max(0, choices.findIndex((choice) => choice.current))
+    const initialSelected = Math.max(0, choices.findIndex((choice) => choice.current))
+    let selected = initialSelected
     let renderedLines = 0
     const wasRaw = process.stdin.isRaw
-    const colors = process.env.NO_COLOR === undefined
-      ? { cyan: "\x1b[36m", yellow: "\x1b[33m", dim: "\x1b[2m", reset: "\x1b[0m" }
-      : { cyan: "", yellow: "", dim: "", reset: "" }
+    const colors = terminalColors()
 
     const clear = () => {
       if (renderedLines > 0) process.stdout.write(`\x1b[${renderedLines}A\r\x1b[J`)
@@ -691,22 +709,24 @@ async function chooseWorktree(repository) {
         .some((value) => value.toLowerCase().includes(normalizedQuery)))
       if (selected >= filtered.length) selected = Math.max(0, filtered.length - 1)
 
-      const terminalWidth = Math.max(40, process.stdout.columns ?? 100)
-      const numberWidth = String(Math.max(1, filtered.length)).length
+      const terminalWidth = Math.max(48, process.stdout.columns ?? 100)
       const idWidth = 8
+      const setupWidth = Math.max(5, ...filtered.map((choice) => choice.setup.length))
       const longestBranch = Math.max(12, ...filtered.map((choice) => choice.branch.length))
-      const branchWidth = Math.min(32, longestBranch, terminalWidth - numberWidth - idWidth - 22)
-      const pathWidth = Math.max(8, terminalWidth - numberWidth - branchWidth - idWidth - 10)
+      const flexibleWidth = terminalWidth - idWidth - setupWidth - 10
+      const branchWidth = Math.min(32, longestBranch, Math.max(8, flexibleWidth - 8))
+      const pathWidth = Math.max(8, flexibleWidth - branchWidth)
       const fit = (value, width) => value.length > width
         ? `${value.slice(0, Math.max(0, width - 1))}…`
         : value.padEnd(width)
       const visibleCount = Math.max(3, (process.stdout.rows ?? 24) - 5)
       const start = Math.max(0, Math.min(selected - Math.floor(visibleCount / 2), filtered.length - visibleCount))
       const visible = filtered.slice(start, start + visibleCount)
+      const escapeAction = filtering ? "clear" : "cancel"
       const lines = [
-        `${colors.dim}${fit("Switch worktree  ↑↓/jk/C-n/C-p move · 1-9 select · / filter · Enter", terminalWidth)}${colors.reset}`,
-        fit(`Filter: ${filtering ? "/" : ""}${query}`, terminalWidth),
-        `${colors.dim}  ${fit("#", numberWidth)}    ${fit("BRANCH", branchWidth)}  ${fit("ID", idWidth)}  ${fit("PATH", pathWidth)}${colors.reset}`,
+        `${colors.dim}${fit(`Switch worktree  Esc ${escapeAction} · Enter select · ↑↓/jk/C-n/C-p · / filter`, terminalWidth)}${colors.reset}`,
+        ...(filtering ? [fit(`Filter: /${query}`, terminalWidth)] : []),
+        `${colors.dim}    ${fit("BRANCH", branchWidth)}  ${fit("ID", idWidth)}  ${fit("SETUP", setupWidth)}  ${fit("PATH", pathWidth)}${colors.reset}`,
       ]
 
       if (visible.length === 0) {
@@ -715,8 +735,8 @@ async function chooseWorktree(repository) {
         visible.forEach((choice, visibleIndex) => {
           const index = start + visibleIndex
           const selection = index === selected ? `${colors.cyan}>${colors.reset}` : " "
-          const currentMarker = choice.current ? `${colors.yellow}@${colors.reset}` : " "
-          lines.push(`${selection} ${fit(String(index + 1), numberWidth)}  ${currentMarker} ${fit(choice.branch, branchWidth)}  ${fit(choice.id, idWidth)}  ${fit(choice.path, pathWidth)}`)
+          const currentMarker = choice.current ? `${colors.yellow}*${colors.reset}` : " "
+          lines.push(`${selection} ${currentMarker} ${fit(choice.branch, branchWidth)}  ${fit(choice.id, idWidth)}  ${fit(choice.setup, setupWidth)}  ${fit(choice.path, pathWidth)}`)
         })
       }
 
@@ -747,7 +767,10 @@ async function chooseWorktree(repository) {
       }
       if (key.name === "escape") {
         if (filtering) {
+          const selectedChoice = filtered[selected]
           filtering = false
+          query = ""
+          selected = selectedChoice ? choices.indexOf(selectedChoice) : initialSelected
           render()
         } else {
           finish(new CliError("Selection cancelled"))
@@ -768,11 +791,6 @@ async function chooseWorktree(repository) {
       } else if (filtering && key.name === "backspace") {
         query = [...query].slice(0, -1).join("")
         selected = 0
-      } else if (!filtering && /^[1-9]$/.test(text)) {
-        const choice = filtered[Number(text) - 1]
-        if (choice) finish(null, choice)
-        else process.stdout.write("\x07")
-        return
       } else if (filtering && text && !key.ctrl && !key.meta) {
         query += text.replace(/[\x00-\x1f\x7f]/g, "")
         selected = 0
@@ -780,7 +798,7 @@ async function chooseWorktree(repository) {
       render()
     }
 
-    emitKeypressEvents(process.stdin)
+    emitKeypressEvents(process.stdin, { escapeCodeTimeout: PICKER_ESCAPE_CODE_TIMEOUT_MS })
     process.stdin.on("keypress", onKeypress)
     process.stdout.on("resize", render)
     process.stdin.setRawMode(true)
@@ -799,18 +817,8 @@ async function commandSwitch(args) {
 }
 
 function worktreeRows(repository) {
-  const current = currentWorktree(repository)
   const metadata = loadMetadata(repository)
-  const rows = repository.worktrees.map((worktree, index) => {
-    const item = metadata.find((entry) => resolve(entry.path) === resolve(worktree.path))
-    return {
-      current: current && resolve(current.path) === resolve(worktree.path),
-      id: item?.id ?? (index === 0 ? "primary" : "-"),
-      branch: worktree.branch ?? "(detached)",
-      setup: item?.setup ?? (index === 0 ? "-" : "unmanaged"),
-      path: worktree.path,
-    }
-  })
+  const rows = linkedWorktreeRows(repository, metadata)
   const registeredPaths = new Set(repository.worktrees.map((worktree) => resolve(worktree.path)))
   for (const item of metadata.filter((entry) => !registeredPaths.has(resolve(entry.path)))) {
     rows.push({ current: false, id: item.id, branch: "-", setup: "stale", path: item.path })
@@ -850,14 +858,16 @@ function commandList(args) {
   if (args.length > 0) throw new CliError("Usage: gwt list")
   const repository = discoverRepository()
   const rows = worktreeRows(repository)
+  const colors = terminalColors()
   const widths = {
-    id: Math.max(2, ...rows.map((row) => displayWidth(row.id))),
     branch: Math.max(6, ...rows.map((row) => displayWidth(row.branch))),
+    id: Math.max(2, ...rows.map((row) => displayWidth(row.id))),
     setup: Math.max(5, ...rows.map((row) => displayWidth(row.setup))),
   }
-  console.log(`  ${padDisplay("ID", widths.id)}  ${padDisplay("BRANCH", widths.branch)}  ${padDisplay("SETUP", widths.setup)}  PATH`)
+  console.log(`${colors.dim}  ${padDisplay("BRANCH", widths.branch)}  ${padDisplay("ID", widths.id)}  ${padDisplay("SETUP", widths.setup)}  PATH${colors.reset}`)
   for (const row of rows) {
-    console.log(`${row.current ? "*" : " "} ${padDisplay(row.id, widths.id)}  ${padDisplay(row.branch, widths.branch)}  ${padDisplay(row.setup, widths.setup)}  ${row.path}`)
+    const currentMarker = row.current ? `${colors.yellow}*${colors.reset}` : " "
+    console.log(`${currentMarker} ${padDisplay(row.branch, widths.branch)}  ${padDisplay(row.id, widths.id)}  ${padDisplay(row.setup, widths.setup)}  ${row.path}`)
   }
 }
 
@@ -1417,9 +1427,9 @@ Options:
   -h, --help      Show help for this command.
 
 Behavior:
-  The picker supports arrow keys, j/k, Ctrl-n/Ctrl-p, number shortcuts, and
-  '/' filtering. Shell integration must be installed for gwt to change the
-  parent shell's directory; otherwise the selected path is only printed.
+  The picker supports arrow keys, j/k, Ctrl-n/Ctrl-p, and '/' filtering. Shell
+  integration must be installed for gwt to change the parent shell's directory;
+  otherwise the selected path is only printed.
 
 Examples:
   gwt switch

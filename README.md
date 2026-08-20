@@ -214,9 +214,9 @@ Setup failures retain the worktree and record the failure. Retry with
 `gwt setup <id>` or remove it explicitly.
 
 Run `gwt switch` without a target to open the interactive picker. Use the
-arrow keys, `j`/`k`, or Ctrl-n/Ctrl-p to move; press 1–9 to select a numbered
-row immediately; or press `/` to filter by branch, ID, or path. Enter switches
-to the selected worktree. Escape leaves filter mode or cancels the picker.
+arrow keys, `j`/`k`, or Ctrl-n/Ctrl-p to move; press `/` to filter by branch,
+ID, or path. Enter switches to the selected worktree. Escape leaves filter
+mode or cancels the picker.
 
 `gwt remove` refuses dirty worktrees and first tries to delete the branch with
 `git branch -d`. If Git rejects safe deletion, an interactive terminal asks

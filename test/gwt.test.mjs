@@ -112,6 +112,7 @@ describe("help", () => {
     assert.equal(switchHelp.status, 0, switchHelp.stderr)
     assert.match(switchHelp.stdout, /Opens the picker when omitted/)
     assert.match(switchHelp.stdout, /gwt switch feature\/auth/)
+    assert.doesNotMatch(switchHelp.stdout, /number shortcut/)
 
     const removeHelp = gwt(fixture, ["remove", "-h"])
     assert.equal(removeHelp.status, 0, removeHelp.stderr)
@@ -271,16 +272,19 @@ describe("worktree lifecycle", () => {
     assert.equal(metadata.ports.SERVER_PORT, metadata.ports.WEB_PORT + 1)
     assert.equal(readFileSync(join(metadata.path, "apps", "web", ".env"), "utf8"), "SECRET=local\n")
 
+    delete fixture.env.NO_COLOR
     const list = gwt(fixture, ["list"])
     assert.equal(list.status, 0, list.stderr)
+    assert.doesNotMatch(list.stdout, /\x1b\[/)
+    assert.match(list.stdout, /^  BRANCH\s+ID\s+SETUP\s+PATH/m)
     assert.match(list.stdout, new RegExp(metadata.id))
     assert.match(list.stdout, /feature\/native-flow/)
 
     git(metadata.path, "branch", "-m", "feature/한글")
     const localizedList = gwt(fixture, ["list"])
     assert.equal(localizedList.status, 0, localizedList.stderr)
-    assert.match(localizedList.stdout, /main {10}-/)
-    assert.match(localizedList.stdout, /feature\/한글 {2}complete/)
+    assert.match(localizedList.stdout, /main {10}primary {3}-/)
+    assert.match(localizedList.stdout, new RegExp(`feature/한글 {2}${metadata.id} {2}complete`))
 
     git(metadata.path, "branch", "-m", "feature/renamed")
     const info = gwt(fixture, ["info", metadata.id])

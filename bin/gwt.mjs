@@ -19,7 +19,7 @@ import {
 } from "node:fs"
 import { createServer } from "node:net"
 import { homedir } from "node:os"
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { emitKeypressEvents } from "node:readline"
 import { createInterface } from "node:readline/promises"
 
@@ -28,7 +28,7 @@ const PORT_MIN = 20_000
 const PORT_MAX = 39_999
 const PICKER_ESCAPE_CODE_TIMEOUT_MS = 50
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
-const DEFAULT_CONFIG = { worktreeDirectory: ".worktrees", copyFiles: [], ports: [] }
+const DEFAULT_CONFIG = { copyFiles: [], ports: [] }
 const SKILL_DIRECTORIES = { claude: ".claude", codex: ".agents" }
 const SKILL_USAGE = `Usage: gwt skill install <${Object.keys(SKILL_DIRECTORIES).join("|")}> [--project] [--dry-run] [--yes]`
 
@@ -136,9 +136,12 @@ function validateConfig(parsed, label) {
     throw new CliError("base must be a non-empty string")
   }
 
-  const worktreeDirectory = validateRelativePath(parsed.worktreeDirectory ?? ".worktrees", "worktreeDirectory")
-  if (worktreeDirectory.split(/[\\/]+/).some((part) => !/^[A-Za-z0-9._-]+$/.test(part))) {
-    throw new CliError("worktreeDirectory can only contain letters, digits, '.', '_', '-', and path separators")
+  let worktreeDirectory
+  if (parsed.worktreeDirectory !== undefined) {
+    worktreeDirectory = validateRelativePath(parsed.worktreeDirectory, "worktreeDirectory")
+    if (worktreeDirectory.split(/[\\/]+/).some((part) => !/^[A-Za-z0-9._-]+$/.test(part))) {
+      throw new CliError("worktreeDirectory can only contain letters, digits, '.', '_', '-', and path separators")
+    }
   }
   if (!Array.isArray(parsed.copyFiles ?? [])) throw new CliError("copyFiles must be an array")
   const copyFiles = (parsed.copyFiles ?? []).map((path, index) => validateRelativePath(path, `copyFiles[${index}]`))
@@ -156,16 +159,59 @@ function validateConfig(parsed, label) {
     if (parsed[hook] !== undefined) validateRelativePath(parsed[hook], hook)
   }
 
-  return {
+  const config = {
     ...parsed,
-    worktreeDirectory,
     copyFiles,
     ports,
   }
+  if (worktreeDirectory !== undefined) config.worktreeDirectory = worktreeDirectory
+  return config
 }
 
 function configHome() {
   return process.env.XDG_CONFIG_HOME || join(homedir(), ".config")
+}
+
+function gwtHome() {
+  const path = process.env.GWT_HOME || join(homedir(), ".gwt")
+  if (!isAbsolute(path)) throw new CliError("GWT_HOME must be an absolute path")
+  return path
+}
+
+function repositoryUsesDirectory(repository, directory) {
+  const resolvedDirectory = pathExists(directory) ? canonical(directory) : resolve(directory)
+  return repository.worktrees.some((worktree) => {
+    if (!pathExists(worktree.path)) return false
+    const worktreePath = canonical(worktree.path)
+    return worktreePath !== repository.primaryPath && dirname(worktreePath) === resolvedDirectory
+  })
+}
+
+function directoryIsEmpty(path) {
+  try {
+    return statSync(path).isDirectory() && readdirSync(path).length === 0
+  } catch {
+    return false
+  }
+}
+
+function defaultWorktreeDirectory(repository) {
+  const root = join(gwtHome(), "worktrees")
+  const name = basename(repository.primaryPath)
+  const namedDirectory = join(root, name)
+  const digest = createHash("sha256").update(repository.primaryPath).digest("hex").slice(0, 8)
+  const disambiguatedDirectory = join(root, `${name}-${digest}`)
+
+  if (repositoryUsesDirectory(repository, disambiguatedDirectory)) return disambiguatedDirectory
+  if (repositoryUsesDirectory(repository, namedDirectory)) return namedDirectory
+  if (!pathExists(namedDirectory) || directoryIsEmpty(namedDirectory)) return namedDirectory
+  return disambiguatedDirectory
+}
+
+function resolveWorktreeDirectory(repository, config) {
+  return config.worktreeDirectory
+    ? resolve(repository.primaryPath, config.worktreeDirectory)
+    : defaultWorktreeDirectory(repository)
 }
 
 function userConfigPath() {
@@ -330,9 +376,10 @@ function resolveWorktree(repository, selector, options = {}) {
 }
 
 function generateId(repository, config) {
+  const directory = resolveWorktreeDirectory(repository, config)
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const id = randomBytes(4).toString("hex")
-    const target = join(repository.primaryPath, config.worktreeDirectory, id)
+    const target = join(directory, id)
     if (!existsSync(metadataPath(repository, id)) && !pathExists(target)) return id
   }
   throw new CliError("Could not generate a unique worktree ID")
@@ -632,24 +679,27 @@ async function commandNew(args) {
   const base = requestedBase
     ? gitOutput(["rev-parse", "--verify", `${requestedBase}^{commit}`], repository.primaryPath)
     : gitOutput(["rev-parse", "HEAD"], repository.primaryPath)
-  const target = join(repository.primaryPath, configDocument.value.worktreeDirectory, id)
-  ensureLocalExclude(repository, configDocument.value.worktreeDirectory)
+  const target = join(resolveWorktreeDirectory(repository, configDocument.value), id)
+  if (configDocument.value.worktreeDirectory) {
+    ensureLocalExclude(repository, configDocument.value.worktreeDirectory)
+  }
 
   git(["worktree", "add", "-b", branch, target, base], repository.primaryPath, { stdio: "inherit" })
+  const targetPath = canonical(target)
   const refreshed = discoverRepository(repository.primaryPath)
-  const worktree = refreshed.worktrees.find((item) => resolve(item.path) === resolve(target))
+  const worktree = refreshed.worktrees.find((item) => resolve(item.path) === targetPath)
 
   try {
     const metadata = await setupWorktree(refreshed, configDocument, worktree, {
       id,
       noHooks: options["no-hooks"],
     })
-    console.log(`Worktree ${metadata.id} is ready at ${target}`)
+    console.log(`Worktree ${metadata.id} is ready at ${targetPath}`)
     console.log(`Branch: ${branch}`)
     for (const [name, port] of Object.entries(metadata.ports)) console.log(`${name}: ${port}`)
-    writeCdDirective(target)
+    writeCdDirective(targetPath)
   } catch (error) {
-    console.error(`Setup failed; worktree retained at ${target}`)
+    console.error(`Setup failed; worktree retained at ${targetPath}`)
     console.error(`Retry: gwt setup ${id}`)
     console.error(`Remove: gwt remove ${id}`)
     throw error
@@ -1024,7 +1074,7 @@ function commandTrust(args) {
 }
 
 function configScaffold() {
-  return { worktreeDirectory: ".worktrees", copyFiles: [], ports: [] }
+  return { copyFiles: [], ports: [] }
 }
 
 function commandConfigCreate(args) {
@@ -1079,6 +1129,7 @@ function commandConfigShow(args) {
   console.log(`Repository config: ${repositoryConfigured ? "configured" : "not created"}`)
   if (repositoryConfigured) console.log(`  File: ${projectPath}`)
   console.log(`Active config: ${activeLabel}`)
+  console.log(`Worktree directory: ${resolveWorktreeDirectory(repository, active.value)}`)
   console.log(JSON.stringify(active.value, null, 2))
 }
 
@@ -1411,10 +1462,13 @@ Options:
 
 Behavior:
   The worktree receives an immutable 8-character ID. gwt creates it below the
-  configured worktreeDirectory, copies configured local files, assigns stable
+  resolved worktree directory, copies configured local files, assigns stable
   ports, and runs postCreate. A setup failure keeps the worktree so setup can
   be retried. With shell integration installed, the current shell moves into
-  the new worktree after setup succeeds.
+  the new worktree after setup succeeds. Without worktreeDirectory, the default
+  is $GWT_HOME/worktrees or ~/.gwt/worktrees when GWT_HOME is not set. A short
+  repository hash is added to the directory name only when needed to avoid a
+  name collision.
 
 Examples:
   gwt new feature/auth
@@ -1579,8 +1633,8 @@ Options:
   -h, --help      Show help for this command.
 
 The output distinguishes a missing user config file from an existing file that
-does not configure the current project. Repository configuration takes
-precedence over user configuration.
+does not configure the current project. It also shows the resolved worktree
+directory. Repository configuration takes precedence over user configuration.
 
 Example:
   gwt config show`,

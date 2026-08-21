@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { basename, dirname, join, resolve } from "node:path"
+import { basename, dirname, join, relative, resolve } from "node:path"
 import { afterEach, describe, test } from "node:test"
 import { mkdtempSync, rmSync } from "node:fs"
 
@@ -31,6 +31,7 @@ function createRepository() {
   temporaryDirectories.push(root)
   const repository = join(root, "repo with spaces")
   const configHome = join(root, "config")
+  const gwtHome = join(root, ".gwt")
   mkdirSync(repository, { recursive: true })
   git(repository, "init", "-b", "main")
   git(repository, "config", "user.name", "GWT Test")
@@ -40,8 +41,21 @@ function createRepository() {
   writeFileSync(join(repository, ".gitignore"), ".worktrees/\n.env\n")
   git(repository, "add", "README.md", ".gitignore")
   git(repository, "commit", "-m", "Initial commit")
-  const env = { ...process.env, XDG_CONFIG_HOME: configHome }
-  return { root, repository, configHome, env }
+  const env = { ...process.env, XDG_CONFIG_HOME: configHome, GWT_HOME: gwtHome }
+  return { root, repository, configHome, gwtHome, env }
+}
+
+function createAdditionalRepository(fixture, parent) {
+  const repository = join(fixture.root, parent, "repo with spaces")
+  mkdirSync(repository, { recursive: true })
+  git(repository, "init", "-b", "main")
+  git(repository, "config", "user.name", "GWT Test")
+  git(repository, "config", "user.email", "gwt@example.com")
+  git(repository, "config", "commit.gpgsign", "false")
+  writeFileSync(join(repository, "README.md"), "fixture\n")
+  git(repository, "add", "README.md")
+  git(repository, "commit", "-m", "Initial commit")
+  return repository
 }
 
 function gwt(fixture, args, options = {}) {
@@ -166,7 +180,6 @@ describe("configuration", () => {
     const path = join(fixture.configHome, "gwt", "config.json")
     const config = JSON.parse(readFileSync(path, "utf8"))
     assert.deepEqual(config.projects["github.com/example/project"], {
-      worktreeDirectory: ".worktrees",
       copyFiles: [],
       ports: [],
     })
@@ -178,6 +191,7 @@ describe("configuration", () => {
     assert.match(shown.stdout, /File: .*config\.json/)
     assert.match(shown.stdout, /Repository config: not created/)
     assert.match(shown.stdout, /Active config: user/)
+    assert.ok(shown.stdout.includes(`Worktree directory: ${join(fixture.gwtHome, "worktrees")}`))
 
     const repeated = gwt(fixture, ["config", "create"])
     assert.equal(repeated.status, 1)
@@ -193,6 +207,17 @@ describe("configuration", () => {
     assert.match(shown.stdout, /User config: project not configured/)
     assert.match(shown.stdout, /File: .*config\.json/)
     assert.match(shown.stdout, /Active config: built-in defaults/)
+  })
+
+  test("requires GWT_HOME to be absolute", () => {
+    const fixture = createRepository()
+    const result = run(process.execPath, [cli, "config", "show"], {
+      cwd: fixture.repository,
+      env: { ...fixture.env, GWT_HOME: "relative-home" },
+    })
+
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /GWT_HOME must be an absolute path/)
   })
 
   test("uses user config by default and project config when present", () => {
@@ -227,7 +252,6 @@ describe("configuration", () => {
     const path = join(fixture.repository, ".gwt.json")
     assert.equal(existsSync(path), true)
     assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), {
-      worktreeDirectory: ".worktrees",
       copyFiles: [".env"],
       ports: ["APP_PORT"],
     })
@@ -253,6 +277,55 @@ describe("configuration", () => {
 })
 
 describe("worktree lifecycle", () => {
+  test("creates worktrees under GWT_HOME by default", () => {
+    const fixture = createRepository()
+
+    const created = gwt(fixture, ["new", "feature/external-default"])
+    assert.equal(created.status, 0, created.stderr)
+    const metadata = JSON.parse(readFileSync(metadataFiles(fixture.repository)[0], "utf8"))
+    const worktreeRoot = join(realpathSync(fixture.gwtHome), "worktrees")
+    assert.equal(relative(worktreeRoot, metadata.path).startsWith(".."), false)
+    assert.equal(relative(fixture.repository, metadata.path).startsWith(".."), true)
+    assert.equal(dirname(metadata.path), join(worktreeRoot, "repo with spaces"))
+  })
+
+  test("adds a short hash only when another repository uses the same name", () => {
+    const fixture = createRepository()
+    assert.equal(gwt(fixture, ["new", "feature/first-repository"]).status, 0)
+
+    const secondRepository = createAdditionalRepository(fixture, "second")
+    const secondFixture = { ...fixture, repository: secondRepository }
+    const firstCreated = gwt(secondFixture, ["new", "feature/second-repository"])
+    assert.equal(firstCreated.status, 0, firstCreated.stderr)
+    const firstMetadata = JSON.parse(readFileSync(metadataFiles(secondRepository)[0], "utf8"))
+    assert.match(basename(dirname(firstMetadata.path)), /^repo with spaces-[a-f0-9]{8}$/)
+
+    const secondCreated = gwt(secondFixture, ["new", "feature/second-again"])
+    assert.equal(secondCreated.status, 0, secondCreated.stderr)
+    const directories = metadataFiles(secondRepository)
+      .map((path) => dirname(JSON.parse(readFileSync(path, "utf8")).path))
+    assert.equal(new Set(directories).size, 1)
+
+    const firstAgain = gwt(fixture, ["new", "feature/first-again"])
+    assert.equal(firstAgain.status, 0, firstAgain.stderr)
+    const firstDirectories = metadataFiles(fixture.repository)
+      .map((path) => dirname(JSON.parse(readFileSync(path, "utf8")).path))
+    const namedDirectory = join(realpathSync(fixture.gwtHome), "worktrees", "repo with spaces")
+    assert.deepEqual([...new Set(firstDirectories)], [namedDirectory])
+  })
+
+  test("preserves an explicitly configured repository-relative directory", () => {
+    const fixture = createRepository()
+    writeConfig(fixture.repository, { worktreeDirectory: ".worktrees" })
+
+    const created = gwt(fixture, ["new", "feature/local-directory"])
+    assert.equal(created.status, 0, created.stderr)
+    const metadata = JSON.parse(readFileSync(metadataFiles(fixture.repository)[0], "utf8"))
+    assert.equal(dirname(metadata.path), join(realpathSync(fixture.repository), ".worktrees"))
+    const commonDir = git(fixture.repository, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    assert.match(readFileSync(join(commonDir, "info", "exclude"), "utf8"), /^\/\.worktrees\/$/m)
+  })
+
   test("creates, sets up, renames, switches to, and removes a worktree", () => {
     const fixture = createRepository()
     mkdirSync(join(fixture.repository, "apps", "web"), { recursive: true })
@@ -590,7 +663,8 @@ describe("shell integration", () => {
     })
     assert.equal(result.status, 0, result.stderr)
     const paths = result.stdout.trim().split("\n")
-    assert.match(paths[0], /\.worktrees\/[a-f0-9]{8}$/)
+    assert.equal(relative(join(realpathSync(fixture.gwtHome), "worktrees"), paths[0]).startsWith(".."), false)
+    assert.match(paths[0], /\/[a-f0-9]{8}$/)
     assert.equal(paths[1], realpathSync(fixture.repository))
   })
 })

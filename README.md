@@ -82,7 +82,6 @@ Repositories without a remote use their canonical path.
 {
   "projects": {
     "github.com/owner/repository": {
-      "worktreeDirectory": ".worktrees",
       "copyFiles": [
         "apps/server/.env",
         "apps/web/.env"
@@ -114,7 +113,6 @@ The project file contains the configuration fields directly:
 ```json
 {
   "base": "origin/main",
-  "worktreeDirectory": ".worktrees",
   "copyFiles": [
     "apps/server/.env",
     "apps/web/.env"
@@ -133,12 +131,16 @@ The two files are not merged. Run `gwt config show` to see whether user and
 repository configuration is available, the location of each existing config
 file, the active source, and its resolved value.
 
-All fields are optional. Without either config, worktrees are created beneath
-`.worktrees`, use the primary worktree's current commit as their base, and run
-no setup actions.
+All fields are optional. Without either config, worktrees are created outside
+the repository beneath `~/.gwt/worktrees`. Set `GWT_HOME` to an absolute path
+to use a different gwt home directory. A repository normally uses a directory
+named after it. If another repository already uses that name, gwt adds a short
+hash derived from the canonical path. Worktrees use the primary worktree's
+current commit as their base and run no setup actions.
 
 - `base`: Git revision used when `--base` is omitted.
-- `worktreeDirectory`: Repository-relative directory for managed worktrees.
+- `worktreeDirectory`: Optional repository-relative directory for managed
+  worktrees. Setting it opts out of the external default.
 - `copyFiles`: Ignored local files copied from the primary worktree without
   overwriting an existing destination.
 - `ports`: Environment variable names assigned stable ports in the range
@@ -146,8 +148,17 @@ no setup actions.
 - `postCreate`: Executable run after files and ports are prepared.
 - `preRemove`: Executable run before removal.
 
-The worktree directory is added to `.git/info/exclude`; tracked project files
-are not modified.
+An explicitly configured repository-relative worktree directory is added to
+`.git/info/exclude`; tracked project files are not modified.
+
+For example, an existing configuration can retain the previous in-repository
+layout explicitly:
+
+```json
+{
+  "worktreeDirectory": ".worktrees"
+}
+```
 
 ## Hooks
 

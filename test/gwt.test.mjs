@@ -279,6 +279,7 @@ describe("worktree lifecycle", () => {
     assert.match(list.stdout, /^  BRANCH\s+ID\s+SETUP\s+PATH/m)
     assert.match(list.stdout, new RegExp(metadata.id))
     assert.match(list.stdout, /feature\/native-flow/)
+    assert.ok(list.stdout.includes(metadata.path))
 
     git(metadata.path, "branch", "-m", "feature/한글")
     const localizedList = gwt(fixture, ["list"])

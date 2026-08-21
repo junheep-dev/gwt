@@ -711,22 +711,19 @@ async function chooseWorktree(repository) {
 
       const terminalWidth = Math.max(48, process.stdout.columns ?? 100)
       const idWidth = 8
-      const setupWidth = Math.max(5, ...filtered.map((choice) => choice.setup.length))
-      const longestBranch = Math.max(12, ...filtered.map((choice) => choice.branch.length))
+      const setupWidth = Math.max(5, ...filtered.map((choice) => displayWidth(choice.setup)))
+      const longestBranch = Math.max(12, ...filtered.map((choice) => displayWidth(choice.branch)))
       const flexibleWidth = terminalWidth - idWidth - setupWidth - 10
       const branchWidth = Math.min(32, longestBranch, Math.max(8, flexibleWidth - 8))
       const pathWidth = Math.max(8, flexibleWidth - branchWidth)
-      const fit = (value, width) => value.length > width
-        ? `${value.slice(0, Math.max(0, width - 1))}…`
-        : value.padEnd(width)
       const visibleCount = Math.max(3, (process.stdout.rows ?? 24) - 5)
       const start = Math.max(0, Math.min(selected - Math.floor(visibleCount / 2), filtered.length - visibleCount))
       const visible = filtered.slice(start, start + visibleCount)
       const escapeAction = filtering ? "clear" : "cancel"
       const lines = [
-        `${colors.dim}${fit(`Switch worktree  Esc ${escapeAction} · Enter select · ↑↓/jk/C-n/C-p · / filter`, terminalWidth)}${colors.reset}`,
-        ...(filtering ? [fit(`Filter: /${query}`, terminalWidth)] : []),
-        `${colors.dim}    ${fit("BRANCH", branchWidth)}  ${fit("ID", idWidth)}  ${fit("SETUP", setupWidth)}  ${fit("PATH", pathWidth)}${colors.reset}`,
+        `${colors.dim}${fitDisplay(`Switch worktree  Esc ${escapeAction} · Enter select · ↑↓/jk/C-n/C-p · / filter`, terminalWidth)}${colors.reset}`,
+        ...(filtering ? [fitDisplay(`Filter: /${query}`, terminalWidth)] : []),
+        `${colors.dim}    ${fitDisplay("BRANCH", branchWidth)}  ${fitDisplay("ID", idWidth)}  ${fitDisplay("SETUP", setupWidth)}  ${fitDisplay("PATH", pathWidth)}${colors.reset}`,
       ]
 
       if (visible.length === 0) {
@@ -736,7 +733,7 @@ async function chooseWorktree(repository) {
           const index = start + visibleIndex
           const selection = index === selected ? `${colors.cyan}>${colors.reset}` : " "
           const currentMarker = choice.current ? `${colors.yellow}*${colors.reset}` : " "
-          lines.push(`${selection} ${currentMarker} ${fit(choice.branch, branchWidth)}  ${fit(choice.id, idWidth)}  ${fit(choice.setup, setupWidth)}  ${fit(choice.path, pathWidth)}`)
+          lines.push(`${selection} ${currentMarker} ${fitDisplay(choice.branch, branchWidth)}  ${fitDisplay(choice.id, idWidth)}  ${fitDisplay(choice.setup, setupWidth)}  ${fitDisplay(choice.path, pathWidth)}`)
         })
       }
 
@@ -854,6 +851,38 @@ function padDisplay(value, width) {
   return `${value}${" ".repeat(Math.max(0, width - displayWidth(value)))}`
 }
 
+function fitDisplay(value, width) {
+  const normalized = value.normalize("NFC")
+  if (displayWidth(normalized) <= width) return padDisplay(normalized, width)
+
+  const contentWidth = width - displayWidth("…")
+  let fitted = ""
+  let fittedWidth = 0
+  for (const character of normalized) {
+    const characterWidth = displayWidth(character)
+    if (fittedWidth + characterWidth > contentWidth) break
+    fitted += character
+    fittedWidth += characterWidth
+  }
+  return padDisplay(`${fitted}…`, width)
+}
+
+function truncateDisplayTail(value, width) {
+  const normalized = value.normalize("NFC")
+  if (displayWidth(normalized) <= width) return normalized
+
+  const contentWidth = width - displayWidth("…")
+  let fitted = ""
+  let fittedWidth = 0
+  for (const character of [...normalized].reverse()) {
+    const characterWidth = displayWidth(character)
+    if (fittedWidth + characterWidth > contentWidth) break
+    fitted = `${character}${fitted}`
+    fittedWidth += characterWidth
+  }
+  return `…${fitted}`
+}
+
 function commandList(args) {
   if (args.length > 0) throw new CliError("Usage: gwt list")
   const repository = discoverRepository()
@@ -864,10 +893,20 @@ function commandList(args) {
     id: Math.max(2, ...rows.map((row) => displayWidth(row.id))),
     setup: Math.max(5, ...rows.map((row) => displayWidth(row.setup))),
   }
-  console.log(`${colors.dim}  ${padDisplay("BRANCH", widths.branch)}  ${padDisplay("ID", widths.id)}  ${padDisplay("SETUP", widths.setup)}  PATH${colors.reset}`)
+  let pathWidth = null
+  if (process.stdout.isTTY) {
+    const minimumWidth = 8 + 6 + widths.id + widths.setup + 4
+    const terminalWidth = Math.max(minimumWidth, process.stdout.columns || 100)
+    const flexibleWidth = terminalWidth - widths.id - widths.setup - 8
+    widths.branch = Math.min(32, widths.branch, Math.max(6, flexibleWidth - 12))
+    pathWidth = flexibleWidth - widths.branch
+  }
+
+  console.log(`${colors.dim}  ${fitDisplay("BRANCH", widths.branch)}  ${fitDisplay("ID", widths.id)}  ${fitDisplay("SETUP", widths.setup)}  PATH${colors.reset}`)
   for (const row of rows) {
     const currentMarker = row.current ? `${colors.yellow}*${colors.reset}` : " "
-    console.log(`${currentMarker} ${padDisplay(row.branch, widths.branch)}  ${padDisplay(row.id, widths.id)}  ${padDisplay(row.setup, widths.setup)}  ${row.path}`)
+    const path = pathWidth === null ? row.path : truncateDisplayTail(row.path, pathWidth)
+    console.log(`${currentMarker} ${fitDisplay(row.branch, widths.branch)}  ${fitDisplay(row.id, widths.id)}  ${fitDisplay(row.setup, widths.setup)}  ${path}`)
   }
 }
 

@@ -203,8 +203,8 @@ Approval is invalidated when `.gwt.json` or either hook changes.
 gwt new [branch] [--base <ref>] [--no-hooks]
 gwt setup [id|branch|path] [--no-hooks]
 gwt list
-gwt switch [id|branch|path]
-gwt info [id|branch|path]
+gwt switch [primary|id|branch|path]
+gwt info [primary|id|branch|path]
 gwt remove [id|branch|path] [--keep-branch|--discard] [--yes] [--no-hooks]
 gwt trust [--revoke]
 gwt config create [--project]
@@ -227,7 +227,9 @@ Setup failures retain the worktree and record the failure. Retry with
 Run `gwt switch` without a target to open the interactive picker. Use the
 arrow keys, `j`/`k`, or Ctrl-n/Ctrl-p to move; press `/` to filter by branch,
 ID, or path. Enter switches to the selected worktree. Escape leaves filter
-mode or cancels the picker.
+mode or cancels the picker. `primary` is a reserved ID for the repository's
+primary worktree, so `gwt switch primary` returns to it from any linked
+worktree.
 
 `gwt remove` refuses dirty worktrees and first tries to delete the branch with
 `git branch -d`. If Git rejects safe deletion, an interactive terminal asks

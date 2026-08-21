@@ -125,6 +125,7 @@ describe("help", () => {
     const switchHelp = gwt(fixture, ["help", "switch"])
     assert.equal(switchHelp.status, 0, switchHelp.stderr)
     assert.match(switchHelp.stdout, /Opens the picker when omitted/)
+    assert.match(switchHelp.stdout, /gwt switch primary/)
     assert.match(switchHelp.stdout, /gwt switch feature\/auth/)
     assert.doesNotMatch(switchHelp.stdout, /number shortcut/)
 
@@ -280,13 +281,21 @@ describe("worktree lifecycle", () => {
   test("creates worktrees under GWT_HOME by default", () => {
     const fixture = createRepository()
 
-    const created = gwt(fixture, ["new", "feature/external-default"])
+    const created = gwt(fixture, ["new", "primary"])
     assert.equal(created.status, 0, created.stderr)
     const metadata = JSON.parse(readFileSync(metadataFiles(fixture.repository)[0], "utf8"))
     const worktreeRoot = join(realpathSync(fixture.gwtHome), "worktrees")
     assert.equal(relative(worktreeRoot, metadata.path).startsWith(".."), false)
     assert.equal(relative(fixture.repository, metadata.path).startsWith(".."), true)
     assert.equal(dirname(metadata.path), join(worktreeRoot, "repo with spaces"))
+
+    const cdFile = join(fixture.root, "reserved-primary-path")
+    const switched = run(process.execPath, [cli, "switch", "primary"], {
+      cwd: metadata.path,
+      env: { ...fixture.env, GWT_CD_FILE: cdFile },
+    })
+    assert.equal(switched.status, 0, switched.stderr)
+    assert.equal(readFileSync(cdFile, "utf8"), realpathSync(fixture.repository))
   })
 
   test("adds a short hash only when another repository uses the same name", () => {
@@ -373,6 +382,19 @@ describe("worktree lifecycle", () => {
     })
     assert.equal(switched.status, 0, switched.stderr)
     assert.equal(readFileSync(cdFile, "utf8"), metadata.path)
+
+    const primaryCdFile = join(fixture.root, "primary-cd-path")
+    const primarySwitch = run(process.execPath, [cli, "switch", "primary"], {
+      cwd: metadata.path,
+      env: { ...fixture.env, GWT_CD_FILE: primaryCdFile },
+    })
+    assert.equal(primarySwitch.status, 0, primarySwitch.stderr)
+    assert.equal(readFileSync(primaryCdFile, "utf8"), realpathSync(fixture.repository))
+
+    const primaryInfo = gwt(fixture, ["info", "primary"], { cwd: metadata.path })
+    assert.equal(primaryInfo.status, 0, primaryInfo.stderr)
+    assert.match(primaryInfo.stdout, /^ID: primary$/m)
+    assert.ok(primaryInfo.stdout.includes(`Path: ${realpathSync(fixture.repository)}`))
 
     const removed = gwt(fixture, ["remove", metadata.id])
     assert.equal(removed.status, 0, removed.stderr)
@@ -614,6 +636,7 @@ describe("shell integration", () => {
 
     const candidates = gwt(fixture, ["__complete", "worktrees"])
     assert.equal(candidates.status, 0, candidates.stderr)
+    assert.match(candidates.stdout, /^primary$/m)
     assert.match(candidates.stdout, new RegExp(metadata.id))
     assert.match(candidates.stdout, /feature\/completion/)
     assert.match(candidates.stdout, /main/)

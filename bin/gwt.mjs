@@ -357,6 +357,8 @@ function resolveWorktree(repository, selector, options = {}) {
     return current
   }
 
+  if (selector === "primary") return repository.primary
+
   const metadata = loadMetadata(repository)
   const idMatch = metadata.find((item) => item.id === selector)
   if (idMatch) {
@@ -856,7 +858,7 @@ async function chooseWorktree(repository) {
 }
 
 async function commandSwitch(args) {
-  if (args.length > 1) throw new CliError("Usage: gwt switch [id|branch|path]")
+  if (args.length > 1) throw new CliError("Usage: gwt switch [primary|id|branch|path]")
   const repository = discoverRepository()
   const worktree = args[0] ? resolveWorktree(repository, args[0]) : await chooseWorktree(repository)
   writeCdDirective(canonical(worktree.path))
@@ -961,7 +963,7 @@ function commandList(args) {
 }
 
 function commandInfo(args) {
-  if (args.length > 1) throw new CliError("Usage: gwt info [id|branch|path]")
+  if (args.length > 1) throw new CliError("Usage: gwt info [primary|id|branch|path]")
   const repository = discoverRepository()
   const worktree = resolveWorktree(repository, args[0])
   const metadata = metadataForWorktree(repository, worktree)
@@ -1383,7 +1385,7 @@ function commandComplete(args) {
 
   if (args[0] === "worktrees") {
     const repository = discoverRepository()
-    const values = []
+    const values = ["primary"]
     for (const worktree of repository.worktrees) {
       const metadata = metadataForWorktree(repository, worktree)
       if (metadata?.id) values.push(metadata.id)
@@ -1511,36 +1513,40 @@ Example:
     switch: `Switch the current shell to another worktree.
 
 Usage:
-  gwt switch [id|branch|path]
+  gwt switch [primary|id|branch|path]
 
 Arguments:
-  id|branch|path  Worktree to switch to. Opens the picker when omitted.
+  selector        Worktree to switch to. Opens the picker when omitted.
 
 Options:
   -h, --help      Show help for this command.
 
 Behavior:
-  The picker supports arrow keys, j/k, Ctrl-n/Ctrl-p, and '/' filtering. Shell
-  integration must be installed for gwt to change the parent shell's directory;
-  otherwise the selected path is only printed.
+  'primary' is the reserved ID for the primary worktree. Other worktrees can be
+  selected by ID, exact branch name, or path. The picker supports arrow keys,
+  j/k, Ctrl-n/Ctrl-p, and '/' filtering. Shell integration must be installed for
+  gwt to change the parent shell's directory; otherwise the path is only printed.
 
 Examples:
   gwt switch
+  gwt switch primary
   gwt switch feature/auth
   gwt switch a1b2c3d4`,
     info: `Show a worktree's identity, Git state, setup status, and assigned ports.
 
 Usage:
-  gwt info [id|branch|path]
+  gwt info [primary|id|branch|path]
 
 Arguments:
-  id|branch|path  Worktree to inspect. Defaults to the current worktree.
+  selector        'primary', an ID, an exact branch name, or a path. Defaults
+                  to the current worktree.
 
 Options:
   -h, --help      Show help for this command.
 
 Examples:
   gwt info
+  gwt info primary
   gwt info feature/auth`,
     remove: `Safely remove a linked worktree and, by default, its branch.
 

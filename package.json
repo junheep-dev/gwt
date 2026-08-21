@@ -1,6 +1,6 @@
 {
   "name": "@junheep/gwt",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Lightweight native Git worktree workflows",
   "license": "MIT",
   "author": "Junhee Park",

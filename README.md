@@ -29,9 +29,10 @@ gwt shell install zsh
 ```
 
 The installer shows the line it will add to `~/.zshrc` and asks for
-confirmation. The integration also provides Zsh completion for commands,
-options, worktrees, and Git refs. It only changes directories; it does not load
-environment variables or run project hooks.
+confirmation. The integration also provides Zsh completion and automatically
+loads assigned ports and configured environment variables when Zsh enters a
+managed worktree. Previous values are restored when Zsh leaves it. Normal
+environment synchronization produces no output.
 
 ## Coding agents
 
@@ -90,6 +91,9 @@ Repositories without a remote use their canonical path.
         "WEB_PORT",
         "SERVER_PORT"
       ],
+      "env": {
+        "NEXT_PUBLIC_API_ENDPOINT": "http://127.0.0.1:${SERVER_PORT}"
+      },
       "postCreate": "hooks/worktree-setup",
       "preRemove": "hooks/worktree-cleanup"
     }
@@ -121,6 +125,9 @@ The project file contains the configuration fields directly:
     "WEB_PORT",
     "SERVER_PORT"
   ],
+  "env": {
+    "NEXT_PUBLIC_API_ENDPOINT": "http://127.0.0.1:${SERVER_PORT}"
+  },
   "postCreate": "./scripts/worktree-setup",
   "preRemove": "./scripts/worktree-cleanup"
 }
@@ -145,6 +152,10 @@ current commit as their base and run no setup actions.
   overwriting an existing destination.
 - `ports`: Environment variable names assigned stable ports in the range
   20000–39999.
+- `env`: Environment variables loaded alongside assigned ports. Values are
+  literal strings with optional `${PORT_NAME}` references to names declared in
+  `ports`. Shell expressions and references to arbitrary process variables are
+  not evaluated.
 - `postCreate`: Executable run after files and ports are prepared.
 - `preRemove`: Executable run before removal.
 
@@ -170,6 +181,7 @@ GWT_PATH
 GWT_PRIMARY_PATH
 GWT_BRANCH
 <each name declared in ports>
+<each name declared in env>
 ```
 
 Example `postCreate` hook:
@@ -187,9 +199,10 @@ Hook paths in user config are resolved relative to the directory containing
 worktree. Both run with the target worktree as their working directory, and
 their standard output and errors are streamed directly to the terminal.
 
-Hooks in user config are trusted because the user added them directly. Hooks
-from a committed `.gwt.json` require explicit trust because they execute
-repository code:
+User configuration is trusted because the user added it directly. Ports and
+environment variables from a committed `.gwt.json` require explicit trust
+because they automatically change the shell; repository hooks require the same
+approval because they execute code:
 
 ```sh
 gwt trust

@@ -28,7 +28,8 @@ const PORT_MIN = 20_000
 const PORT_MAX = 39_999
 const PICKER_ESCAPE_CODE_TIMEOUT_MS = 50
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
-const DEFAULT_CONFIG = { copyFiles: [], ports: [] }
+const SHELL_ENV_STATE = "GWT_SHELL_ENV_STATE"
+const DEFAULT_CONFIG = { copyFiles: [], ports: [], env: {} }
 const SKILL_DIRECTORIES = { claude: ".claude", codex: ".agents" }
 const SKILL_USAGE = `Usage: gwt skill install <${Object.keys(SKILL_DIRECTORIES).join("|")}> [--project] [--dry-run] [--yes]`
 
@@ -127,7 +128,7 @@ function validateRelativePath(value, field) {
 
 function validateConfig(parsed, label) {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new CliError(`${label} must contain an object`)
-  const allowed = new Set(["base", "worktreeDirectory", "copyFiles", "ports", "postCreate", "preRemove"])
+  const allowed = new Set(["base", "worktreeDirectory", "copyFiles", "ports", "env", "postCreate", "preRemove"])
   for (const key of Object.keys(parsed)) {
     if (!allowed.has(key)) throw new CliError(`${label} contains an unknown field: ${key}`)
   }
@@ -150,10 +151,32 @@ function validateConfig(parsed, label) {
   if (!Array.isArray(parsed.ports ?? [])) throw new CliError("ports must be an array")
   const ports = (parsed.ports ?? []).map((name, index) => {
     if (typeof name !== "string" || !ENV_NAME.test(name)) throw new CliError(`ports[${index}] is not a valid environment variable name`)
+    if (name.startsWith("GWT_")) throw new CliError(`ports[${index}] cannot use the reserved GWT_ prefix`)
     return name
   })
   if (new Set(ports).size !== ports.length) throw new CliError("ports cannot contain duplicates")
   if (ports.length > 100) throw new CliError("ports cannot contain more than 100 entries")
+
+  if (!parsed.env || typeof parsed.env !== "object" || Array.isArray(parsed.env)) {
+    if (parsed.env !== undefined) throw new CliError("env must be an object")
+  }
+  const envEntries = Object.entries(parsed.env ?? {})
+  if (envEntries.length > 100) throw new CliError("env cannot contain more than 100 entries")
+  const env = Object.fromEntries(envEntries.map(([name, value]) => {
+    if (!ENV_NAME.test(name)) throw new CliError(`env.${name} is not a valid environment variable name`)
+    if (name.startsWith("GWT_")) throw new CliError(`env.${name} cannot use the reserved GWT_ prefix`)
+    if (ports.includes(name)) throw new CliError(`env.${name} conflicts with a configured port`)
+    if (typeof value !== "string") throw new CliError(`env.${name} must be a string`)
+
+    const remainder = value.replace(/\$\{([^}]*)\}/g, (_, reference) => {
+      if (!ENV_NAME.test(reference) || !ports.includes(reference)) {
+        throw new CliError(`env.${name} references unknown port ${reference || "(empty)"}`)
+      }
+      return ""
+    })
+    if (remainder.includes("${")) throw new CliError(`env.${name} contains an invalid port reference`)
+    return [name, value]
+  }))
 
   for (const hook of ["postCreate", "preRemove"]) {
     if (parsed[hook] !== undefined) validateRelativePath(parsed[hook], hook)
@@ -163,9 +186,22 @@ function validateConfig(parsed, label) {
     ...parsed,
     copyFiles,
     ports,
+    env,
   }
   if (worktreeDirectory !== undefined) config.worktreeDirectory = worktreeDirectory
   return config
+}
+
+function resolveConfiguredEnv(config, ports) {
+  return Object.fromEntries(Object.entries(config.env).map(([name, template]) => [
+    name,
+    template.replace(/\$\{([^}]*)\}/g, (_, reference) => {
+      if (!Object.hasOwn(ports, reference)) {
+        throw new CliError(`Cannot resolve env.${name}: this worktree has no assigned ${reference}`)
+      }
+      return String(ports[reference])
+    }),
+  ]))
 }
 
 function configHome() {
@@ -447,7 +483,7 @@ function hookPaths(configDocument, worktreePath) {
 
 function trustFingerprint(repository, configDocument, worktreePath) {
   const hooks = hookPaths(configDocument, worktreePath)
-  if (hooks.length === 0) return null
+  if (hooks.length === 0 && configDocument.value.ports.length === 0 && Object.keys(configDocument.value.env).length === 0) return null
   const hash = createHash("sha256")
   hash.update(repository.primaryPath)
   hash.update("\0")
@@ -517,20 +553,24 @@ async function ensureTrusted(repository, configDocument, worktreePath) {
   if (!fingerprint || isTrusted(repository, fingerprint)) return
 
   const hooks = hookPaths(configDocument, worktreePath)
-  console.error("This repository wants to run:")
+  console.error("This repository wants to configure your development environment:")
   for (const hook of hooks) console.error(`  ${hook.name}: ${hook.configuredPath}`)
+  for (const name of configDocument.value.ports) console.error(`  port: ${name}`)
+  for (const name of Object.keys(configDocument.value.env)) console.error(`  env: ${name}`)
   const allowed = await ask("Allow and remember? [y/N] ")
-  if (!allowed) throw new CliError("Project hooks are not trusted. Run 'gwt trust' to approve them")
+  if (!allowed) throw new CliError("Project configuration is not trusted. Run 'gwt trust' to approve it")
   saveTrust(repository, fingerprint)
 }
 
-function hookContext(repository, worktree, metadata) {
+function hookContext(repository, config, worktree, metadata) {
+  const ports = metadata?.ports ?? {}
   return {
     id: metadata?.id ?? "",
     path: canonical(worktree.path),
     primaryPath: repository.primaryPath,
     branch: worktree.branch ?? "",
-    ports: metadata?.ports ?? {},
+    ports,
+    environment: resolveConfiguredEnv(config, ports),
   }
 }
 
@@ -538,7 +578,7 @@ function runHook(name, repository, configDocument, worktree, metadata) {
   const configuredPath = configDocument.value[name]
   if (!configuredPath) return
   const hook = hookPaths(configDocument, canonical(worktree.path)).find((item) => item.name === name)
-  const context = hookContext(repository, worktree, metadata)
+  const context = hookContext(repository, configDocument.value, worktree, metadata)
   const env = {
     ...process.env,
     GWT_ID: context.id,
@@ -546,6 +586,7 @@ function runHook(name, repository, configDocument, worktree, metadata) {
     GWT_PRIMARY_PATH: context.primaryPath,
     GWT_BRANCH: context.branch,
     ...Object.fromEntries(Object.entries(context.ports).map(([key, value]) => [key, String(value)])),
+    ...context.environment,
   }
   console.log(`Running ${name}...`)
   const result = run(hook.path, [], {
@@ -1062,21 +1103,21 @@ function commandTrust(args) {
   const configDocument = loadConfig(repository)
   if (!configDocument.requiresTrust) {
     console.log(configDocument.source === "user"
-      ? "User config hooks are trusted automatically"
+      ? "User configuration is trusted automatically"
       : "This repository has no project config to approve")
     return
   }
   const fingerprint = trustFingerprint(repository, configDocument, canonical(current.path))
   if (!fingerprint) {
-    console.log("This repository has no project hooks to approve")
+    console.log("This repository has no project configuration that requires approval")
     return
   }
   saveTrust(repository, fingerprint)
-  console.log(`Trusted project hooks for ${repository.primaryPath}`)
+  console.log(`Trusted project configuration for ${repository.primaryPath}`)
 }
 
 function configScaffold() {
-  return { copyFiles: [], ports: [] }
+  return { copyFiles: [], ports: [], env: {} }
 }
 
 function commandConfigCreate(args) {
@@ -1141,6 +1182,94 @@ function commandConfig(args) {
   throw new CliError("Usage: gwt config <create [--project]|show>")
 }
 
+function configuredShellEnvironment() {
+  const insideRepository = git(["rev-parse", "--is-inside-work-tree"], process.cwd(), { allowFailure: true })
+  if (insideRepository.status !== 0) return {}
+
+  const repository = discoverRepository()
+  const worktree = currentWorktree(repository)
+  if (!worktree || resolve(worktree.path) === resolve(repository.primaryPath)) return {}
+
+  const metadata = metadataForWorktree(repository, worktree)
+  if (!metadata) return {}
+
+  const configDocument = loadConfig(repository)
+  if (configDocument.requiresTrust) {
+    const fingerprint = trustFingerprint(repository, configDocument, canonical(worktree.path))
+    if (!isTrusted(repository, fingerprint)) return {}
+  }
+
+  const ports = Object.fromEntries(configDocument.value.ports.map((name) => {
+    if (!Object.hasOwn(metadata.ports ?? {}, name)) {
+      throw new CliError(`This worktree has no assigned ${name}; recreate it after changing ports`)
+    }
+    return [name, String(metadata.ports[name])]
+  }))
+  return { ...ports, ...resolveConfiguredEnv(configDocument.value, metadata.ports ?? {}) }
+}
+
+function readShellEnvironmentState() {
+  const encoded = process.env[SHELL_ENV_STATE]
+  if (!encoded) return { originals: {} }
+
+  try {
+    const parsed = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"))
+    if (!parsed || typeof parsed.originals !== "object" || Array.isArray(parsed.originals)) throw new Error()
+    const originals = Object.fromEntries(Object.entries(parsed.originals).map(([name, original]) => {
+      if (!ENV_NAME.test(name) || name.startsWith("GWT_")) throw new Error()
+      if (!original || typeof original !== "object" || typeof original.present !== "boolean") throw new Error()
+      if (original.present && typeof original.value !== "string") throw new Error()
+      return [name, original.present ? { present: true, value: original.value } : { present: false }]
+    }))
+    return { originals }
+  } catch {
+    return { originals: {} }
+  }
+}
+
+function quoteZsh(value) {
+  return `'${String(value).replaceAll("'", `'\\''`)}'`
+}
+
+function shellEnvironmentCommands(environment) {
+  const previous = readShellEnvironmentState()
+  const names = new Set([...Object.keys(previous.originals), ...Object.keys(environment)])
+  const originals = {}
+  const commands = []
+
+  for (const name of names) {
+    const original = previous.originals[name] ?? (Object.hasOwn(process.env, name)
+      ? { present: true, value: process.env[name] }
+      : { present: false })
+
+    if (Object.hasOwn(environment, name)) {
+      originals[name] = original
+      commands.push(`export ${name}=${quoteZsh(environment[name])}`)
+    } else if (original.present) {
+      commands.push(`export ${name}=${quoteZsh(original.value)}`)
+    } else {
+      commands.push(`unset ${name}`)
+    }
+  }
+
+  if (Object.keys(originals).length === 0) {
+    commands.push(`unset ${SHELL_ENV_STATE}`)
+  } else {
+    const state = Buffer.from(JSON.stringify({ originals })).toString("base64url")
+    commands.push(`export ${SHELL_ENV_STATE}=${quoteZsh(state)}`)
+  }
+  return commands.join("\n")
+}
+
+function commandShellEnvironment(args) {
+  if (args.length !== 1 || args[0] !== "zsh") throw new CliError("Invalid shell environment request")
+  let environment = {}
+  try {
+    environment = configuredShellEnvironment()
+  } catch {}
+  console.log(shellEnvironmentCommands(environment))
+}
+
 function zshIntegration() {
   return `# gwt shell integration for zsh
 if command -v gwt >/dev/null 2>&1; then
@@ -1152,7 +1281,16 @@ if command -v gwt >/dev/null 2>&1; then
       builtin cd -- "$(<"$cd_file")" || exit_code=$?
     fi
     rm -f -- "$cd_file"
+    if [[ $exit_code -eq 0 ]]; then
+      _gwt_sync_env
+    fi
     return $exit_code
+  }
+
+  _gwt_sync_env() {
+    local commands
+    commands="$(command gwt __shell_env zsh 2>/dev/null)" || return 0
+    [[ -n "$commands" ]] && eval "$commands"
   }
 
   _gwt_worktrees() {
@@ -1252,6 +1390,12 @@ if command -v gwt >/dev/null 2>&1; then
   if (( $+functions[compdef] )); then
     compdef _gwt gwt
   fi
+
+  typeset -ga chpwd_functions
+  if (( ! \${chpwd_functions[(I)_gwt_sync_env]} )); then
+    chpwd_functions+=(_gwt_sync_env)
+  fi
+  _gwt_sync_env
 fi`
 }
 
@@ -1280,13 +1424,16 @@ stay accurate across versions.
 
 ## What the help does not make obvious
 
-- Hooks declared by a committed \`.gwt.json\` do not run until the repository is
-  approved with \`gwt trust\`. Approval is invalidated whenever the config or a
-  hook changes, so a repository that worked before can start asking again.
+- Ports, environment variables, and hooks declared by a committed \`.gwt.json\`
+  are not applied until the repository is approved with \`gwt trust\`. Approval
+  is invalidated whenever the config or a hook changes, so a repository that
+  worked before can start asking again.
 - A failed setup keeps the worktree and records the failure. Retry it with
   \`gwt setup <id>\` rather than removing and recreating the worktree.
-- Ports are assigned per worktree. Read them from \`gwt info\` instead of assuming
-  a project default; two worktrees of the same project never share a port.
+- Ports are assigned per worktree. With shell integration installed, assigned
+  ports and configured environment variables load automatically. Read ports
+  from \`gwt info\` instead of assuming a project default; two worktrees of the
+  same project never share a port.
 - \`gwt switch\` changes the shell's directory only when the shell integration is
   installed. Otherwise it just prints the path.
 - \`gwt switch\` with no target opens an interactive picker, so always pass an
@@ -1430,7 +1577,7 @@ Commands:
   switch    Switch the current shell to a worktree
   info      Show worktree details and assigned ports
   remove    Safely remove a worktree and optionally its branch
-  trust     Approve or revoke repository project hooks
+  trust     Approve or revoke repository project configuration
   config    Create or inspect configuration
   shell     Install shell integration
   skill     Install the gwt skill for coding agents
@@ -1575,7 +1722,7 @@ Examples:
   gwt remove
   gwt remove feature/auth --keep-branch
   gwt remove a1b2c3d4 --discard --yes`,
-    trust: `Approve or revoke hooks declared by the repository's .gwt.json.
+    trust: `Approve or revoke active configuration declared by the repository's .gwt.json.
 
 Usage:
   gwt trust [--revoke]
@@ -1584,9 +1731,10 @@ Options:
   --revoke        Remove the stored approval for this repository.
   -h, --help      Show help for this command.
 
-Approval is tied to the configuration and hook contents, so changing either
-requires approval again. Hooks declared in user configuration are trusted
-automatically.
+Approval is required before repository-defined ports or environment variables
+are applied, or repository hooks run. It is tied to the configuration and hook
+contents, so changing either requires approval again. User configuration is
+trusted automatically.
 
 Examples:
   gwt trust
@@ -1653,7 +1801,8 @@ Options:
   -h, --help      Show help for this command.
 
 The integration lets gwt change the current shell's directory after new,
-switch, and removal of the current worktree. It also installs completion.
+switch, and removal of the current worktree. It also loads the worktree's
+assigned ports and configured environment, and installs completion.
 
 Example:
   gwt shell install zsh`,
@@ -1668,7 +1817,9 @@ Options:
   -h, --help      Show help for this command.
 
 The command adds one initialization line to ~/.zshrc, or to $ZDOTDIR/.zshrc
-when ZDOTDIR is set. Restart Zsh or source the file after installation.
+when ZDOTDIR is set. Restart Zsh or source the file after installation. The
+integration updates the environment when Zsh starts or changes directory and
+restores previous values after leaving a managed worktree.
 
 Examples:
   gwt shell install zsh
@@ -1745,6 +1896,7 @@ async function main() {
   if (command === "shell") return commandShell(args)
   if (command === "skill") return commandSkill(args)
   if (command === "__complete") return commandComplete(args)
+  if (command === "__shell_env") return commandShellEnvironment(args)
   throw new CliError(`Unknown command: ${command}`)
 }
 

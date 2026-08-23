@@ -183,6 +183,7 @@ describe("configuration", () => {
     assert.deepEqual(config.projects["github.com/example/project"], {
       copyFiles: [],
       ports: [],
+      env: {},
     })
 
     const shown = gwt(fixture, ["config", "show"])
@@ -232,6 +233,7 @@ describe("configuration", () => {
     assert.equal(gwt(fixture, ["remove", userMetadata.id]).status, 0)
 
     writeConfig(fixture.repository, { ports: ["PROJECT_PORT"] })
+    assert.equal(gwt(fixture, ["trust"]).status, 0)
     const projectWorktree = gwt(fixture, ["new", "feature/project-config"])
     assert.equal(projectWorktree.status, 0, projectWorktree.stderr)
     const projectMetadata = JSON.parse(readFileSync(metadataFiles(fixture.repository)[0], "utf8"))
@@ -255,6 +257,7 @@ describe("configuration", () => {
     assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), {
       copyFiles: [".env"],
       ports: ["APP_PORT"],
+      env: {},
     })
     assert.match(git(fixture.repository, "status", "--short"), /\?\? \.gwt\.json/)
   })
@@ -274,6 +277,36 @@ describe("configuration", () => {
     assert.equal(readFileSync(join(metadata.path, "user-hook-result"), "utf8"), "ran\n")
     assert.equal(existsSync(join(metadata.path, "hooks", "setup")), false)
     assert.equal(existsSync(join(fixture.configHome, "gwt", "approvals.json")), false)
+  })
+
+  test("validates configured environment templates", () => {
+    const fixture = createRepository()
+    writeUserConfig(fixture, {
+      ports: ["SERVER_PORT"],
+      env: { API_URL: "http://127.0.0.1:${MISSING_PORT}" },
+    })
+    const unknownReference = gwt(fixture, ["config", "show"])
+    assert.equal(unknownReference.status, 1)
+    assert.match(unknownReference.stderr, /env\.API_URL references unknown port MISSING_PORT/)
+
+    writeUserConfig(fixture, { env: { GWT_OVERRIDE: "value" } })
+    const reservedName = gwt(fixture, ["config", "show"])
+    assert.equal(reservedName.status, 1)
+    assert.match(reservedName.stderr, /reserved GWT_ prefix/)
+  })
+
+  test("requires trust for environment declared by project config", () => {
+    const fixture = createRepository()
+    writeConfig(fixture.repository, { env: { API_URL: "http://127.0.0.1:3001" } })
+
+    assert.equal(gwt(fixture, ["trust"]).status, 0)
+    const created = gwt(fixture, ["new", "feature/project-env"])
+    assert.equal(created.status, 0, created.stderr)
+
+    writeConfig(fixture.repository, { env: { API_URL: "http://127.0.0.1:4001" } })
+    const changed = gwt(fixture, ["new", "feature/changed-project-env"])
+    assert.equal(changed.status, 1)
+    assert.match(changed.stderr, /Project configuration is not trusted/)
   })
 })
 
@@ -343,6 +376,7 @@ describe("worktree lifecycle", () => {
       copyFiles: ["apps/web/.env"],
       ports: ["WEB_PORT", "SERVER_PORT"],
     })
+    assert.equal(gwt(fixture, ["trust"]).status, 0)
 
     const created = gwt(fixture, ["new", "feature/native-flow"])
     assert.equal(created.status, 0, created.stderr)
@@ -433,12 +467,16 @@ describe("worktree lifecycle", () => {
     writeFileSync(hook, [
       "#!/bin/sh",
       "set -eu",
-      "printf '%s\\n' \"$GWT_ID|$GWT_BRANCH|$APP_PORT\" > hook-result",
+      "printf '%s\\n' \"$GWT_ID|$GWT_BRANCH|$APP_PORT|$API_URL\" > hook-result",
       "cat > hook-context.json",
       "",
     ].join("\n"))
     chmodSync(hook, 0o755)
-    writeConfig(fixture.repository, { ports: ["APP_PORT"], postCreate: "scripts/setup" })
+    writeConfig(fixture.repository, {
+      ports: ["APP_PORT"],
+      env: { API_URL: "http://127.0.0.1:${APP_PORT}" },
+      postCreate: "scripts/setup",
+    })
     git(fixture.repository, "add", "scripts/setup")
     git(fixture.repository, "commit", "-m", "Add setup hook")
 
@@ -448,11 +486,12 @@ describe("worktree lifecycle", () => {
     const metadata = JSON.parse(readFileSync(metadataFiles(fixture.repository)[0], "utf8"))
     assert.equal(
       readFileSync(join(metadata.path, "hook-result"), "utf8").trim(),
-      `${metadata.id}|feature/hooks|${metadata.ports.APP_PORT}`,
+      `${metadata.id}|feature/hooks|${metadata.ports.APP_PORT}|http://127.0.0.1:${metadata.ports.APP_PORT}`,
     )
     const context = JSON.parse(readFileSync(join(metadata.path, "hook-context.json"), "utf8"))
     assert.equal(context.id, metadata.id)
     assert.deepEqual(context.ports, metadata.ports)
+    assert.deepEqual(context.environment, { API_URL: `http://127.0.0.1:${metadata.ports.APP_PORT}` })
   })
 
   test("invalidates trust when hook content changes", () => {
@@ -471,7 +510,7 @@ describe("worktree lifecycle", () => {
     git(fixture.repository, "commit", "-m", "Change setup hook")
     const created = gwt(fixture, ["new", "feature/trust-change"])
     assert.equal(created.status, 1)
-    assert.match(created.stderr, /Project hooks are not trusted/)
+    assert.match(created.stderr, /Project configuration is not trusted/)
     const metadata = JSON.parse(readFileSync(metadataFiles(fixture.repository)[0], "utf8"))
     assert.equal(metadata.setup, "failed")
     assert.equal(existsSync(metadata.path), true)
@@ -515,6 +554,7 @@ describe("worktree lifecycle", () => {
   test("adopts a native linked worktree during setup", () => {
     const fixture = createRepository()
     writeConfig(fixture.repository, { ports: ["APP_PORT"] })
+    assert.equal(gwt(fixture, ["trust"]).status, 0)
     const nativePath = join(fixture.root, "native worktree")
     git(fixture.repository, "worktree", "add", "-b", "feature/adopt", nativePath, "HEAD")
 
@@ -528,15 +568,69 @@ describe("worktree lifecycle", () => {
 })
 
 describe("shell integration", () => {
-  test("emits a zsh wrapper and completion without exporting ports", () => {
+  test("emits a zsh wrapper with environment synchronization and completion", () => {
     const fixture = createRepository()
     const result = gwt(fixture, ["shell", "init", "zsh"])
     assert.equal(result.status, 0, result.stderr)
     assert.match(result.stdout, /GWT_CD_FILE/)
     assert.match(result.stdout, /builtin cd/)
+    assert.match(result.stdout, /__shell_env zsh/)
+    assert.match(result.stdout, /chpwd_functions/)
     assert.match(result.stdout, /compdef _gwt gwt/)
     assert.match(result.stdout, /__complete worktrees/)
-    assert.doesNotMatch(result.stdout, /export WEB_PORT/)
+  })
+
+  test("loads worktree environment silently and restores the previous shell", () => {
+    const fixture = createRepository()
+    const commandMarker = join(fixture.root, "shell-command-ran")
+    const literal = `it's $(touch ${commandMarker})`
+    writeUserConfig(fixture, {
+      ports: ["WEB_PORT", "SERVER_PORT"],
+      env: {
+        API_URL: "http://127.0.0.1:${SERVER_PORT}",
+        LITERAL: literal,
+      },
+    })
+    const created = gwt(fixture, ["new", "feature/shell-env"])
+    assert.equal(created.status, 0, created.stderr)
+    const metadata = JSON.parse(readFileSync(metadataFiles(fixture.repository)[0], "utf8"))
+
+    const binDirectory = join(fixture.root, "bin")
+    mkdirSync(binDirectory)
+    symlinkSync(cli, join(binDirectory, "gwt"))
+    const nestedScript = join(fixture.root, "nested.zsh")
+    writeFileSync(nestedScript, [
+      'eval "$(gwt shell init zsh)"',
+      `builtin cd -- ${JSON.stringify(realpathSync(fixture.repository))}`,
+      'print -r -- "nested:$WEB_PORT:${SERVER_PORT-unset}:${API_URL-unset}"',
+      "",
+    ].join("\n"))
+    const script = [
+      'eval "$(gwt shell init zsh)"',
+      'print -r -- "inside:$WEB_PORT:$SERVER_PORT:$API_URL"',
+      'print -r -- "$LITERAL"',
+      `zsh ${JSON.stringify(nestedScript)}`,
+      `builtin cd -- ${JSON.stringify(realpathSync(fixture.repository))}`,
+      'print -r -- "outside:$WEB_PORT:${SERVER_PORT-unset}:${API_URL-unset}"',
+    ].join("; ")
+    const shellEnv = { ...fixture.env, PATH: `${binDirectory}:${process.env.PATH}`, WEB_PORT: "original" }
+    delete shellEnv.SERVER_PORT
+    delete shellEnv.API_URL
+    delete shellEnv.GWT_SHELL_ENV_STATE
+    const result = run("zsh", ["-c", script], {
+      cwd: metadata.path,
+      env: shellEnv,
+    })
+
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stderr, "")
+    assert.deepEqual(result.stdout.trim().split("\n"), [
+      `inside:${metadata.ports.WEB_PORT}:${metadata.ports.SERVER_PORT}:http://127.0.0.1:${metadata.ports.SERVER_PORT}`,
+      literal,
+      "nested:original:unset:unset",
+      "outside:original:unset:unset",
+    ])
+    assert.equal(existsSync(commandMarker), false)
   })
 
   test("installs zsh integration once and keeps init out of default help", () => {

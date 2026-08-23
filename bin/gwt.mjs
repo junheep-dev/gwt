@@ -1534,11 +1534,12 @@ function commandComplete(args) {
     const repository = discoverRepository()
     const values = ["primary"]
     for (const worktree of repository.worktrees) {
+      if (resolve(worktree.path) === resolve(repository.primaryPath)) continue
       const metadata = metadataForWorktree(repository, worktree)
-      if (metadata?.id) values.push(metadata.id)
-      if (worktree.branch) values.push(worktree.branch)
+      const selector = worktree.branch ?? metadata?.id
+      if (selector) values.push(selector)
     }
-    console.log([...new Set(values)].join("\n"))
+    console.log(values.join("\n"))
     return
   }
 

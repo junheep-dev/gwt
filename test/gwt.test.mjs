@@ -726,14 +726,22 @@ describe("shell integration", () => {
   test("registers zsh completion and returns repository-aware candidates", () => {
     const fixture = createRepository()
     assert.equal(gwt(fixture, ["new", "feature/completion"]).status, 0)
-    const metadata = JSON.parse(readFileSync(metadataFiles(fixture.repository)[0], "utf8"))
+    const branchMetadata = JSON.parse(readFileSync(metadataFiles(fixture.repository)[0], "utf8"))
+    const detachedPath = join(fixture.root, "detached worktree")
+    git(fixture.repository, "worktree", "add", "--detach", detachedPath, "HEAD")
+    assert.equal(gwt(fixture, ["setup"], { cwd: detachedPath }).status, 0)
+    const detachedMetadata = metadataFiles(fixture.repository)
+      .map((path) => JSON.parse(readFileSync(path, "utf8")))
+      .find((metadata) => metadata.path === realpathSync(detachedPath))
 
     const candidates = gwt(fixture, ["__complete", "worktrees"])
     assert.equal(candidates.status, 0, candidates.stderr)
-    assert.match(candidates.stdout, /^primary$/m)
-    assert.match(candidates.stdout, new RegExp(metadata.id))
-    assert.match(candidates.stdout, /feature\/completion/)
-    assert.match(candidates.stdout, /main/)
+    assert.deepEqual(candidates.stdout.trim().split("\n"), [
+      "primary",
+      "feature/completion",
+      detachedMetadata.id,
+    ])
+    assert.doesNotMatch(candidates.stdout, new RegExp(branchMetadata.id))
 
     const refs = gwt(fixture, ["__complete", "refs"])
     assert.equal(refs.status, 0, refs.stderr)

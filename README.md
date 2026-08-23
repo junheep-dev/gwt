@@ -29,10 +29,11 @@ gwt shell install zsh
 ```
 
 The installer shows the line it will add to `~/.zshrc` and asks for
-confirmation. The integration also provides Zsh completion and automatically
-loads assigned ports and configured environment variables when Zsh enters a
-managed worktree. Previous values are restored when Zsh leaves it. Normal
-environment synchronization produces no output.
+confirmation. The integration also provides Zsh completion, which lists one
+row per worktree and completes worktree IDs as well as the branch names it
+shows. It also automatically loads assigned ports and configured environment
+variables when Zsh enters a managed worktree. Previous values are restored
+when Zsh leaves it. Normal environment synchronization produces no output.
 
 ## Coding agents
 

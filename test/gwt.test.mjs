@@ -736,12 +736,11 @@ describe("shell integration", () => {
 
     const candidates = gwt(fixture, ["__complete", "worktrees"])
     assert.equal(candidates.status, 0, candidates.stderr)
-    assert.deepEqual(candidates.stdout.trim().split("\n"), [
-      "primary",
-      "feature/completion",
-      detachedMetadata.id,
+    assert.deepEqual(candidates.stdout.replace(/\n$/, "").split("\n"), [
+      "primary\tmain",
+      `${branchMetadata.id}\tfeature/completion`,
+      `${detachedMetadata.id}\t`,
     ])
-    assert.doesNotMatch(candidates.stdout, new RegExp(branchMetadata.id))
 
     const refs = gwt(fixture, ["__complete", "refs"])
     assert.equal(refs.status, 0, refs.stderr)

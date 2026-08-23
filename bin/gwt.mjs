@@ -1294,9 +1294,21 @@ if command -v gwt >/dev/null 2>&1; then
   }
 
   _gwt_worktrees() {
-    local -a targets
-    targets=("\${(@f)$(command gwt __complete worktrees 2>/dev/null)}")
-    compadd -a targets
+    local -a lines selectors aliases
+    local line id branch tab=$'\\t'
+    lines=("\${(@f)$(command gwt __complete worktrees 2>/dev/null)}")
+    for line in $lines; do
+      id="\${line%%\${tab}*}"
+      branch="\${line#*\${tab}}"
+      if [[ -n "$branch" ]]; then
+        selectors+=("\${branch}:\${id:-unmanaged}")
+        [[ -n "$id" ]] && aliases+=("$id")
+      elif [[ -n "$id" ]]; then
+        selectors+=("\${id}:detached")
+      fi
+    done
+    (( $#selectors )) && _describe -t worktrees 'worktree' selectors
+    [[ -n "$PREFIX" ]] && (( $#aliases )) && compadd -n -a aliases
   }
 
   _gwt_refs() {
@@ -1532,14 +1544,15 @@ function commandComplete(args) {
 
   if (args[0] === "worktrees") {
     const repository = discoverRepository()
-    const values = ["primary"]
+    const lines = [`primary\t${repository.primary.branch ?? ""}`]
     for (const worktree of repository.worktrees) {
       if (resolve(worktree.path) === resolve(repository.primaryPath)) continue
       const metadata = metadataForWorktree(repository, worktree)
-      const selector = worktree.branch ?? metadata?.id
-      if (selector) values.push(selector)
+      const id = metadata?.id ?? ""
+      const branch = worktree.branch ?? ""
+      if (id || branch) lines.push(`${id}\t${branch}`)
     }
-    console.log(values.join("\n"))
+    console.log(lines.join("\n"))
     return
   }
 

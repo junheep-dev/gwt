@@ -1325,6 +1325,7 @@ if command -v gwt >/dev/null 2>&1; then
       'new:Create and set up a worktree'
       'setup:Set up an existing worktree'
       'list:List worktrees'
+      'ls:List worktrees'
       'switch:Switch to a worktree'
       'info:Show worktree details'
       'remove:Remove a worktree'
@@ -1353,7 +1354,7 @@ if command -v gwt >/dev/null 2>&1; then
           '--no-hooks[skip project hooks]' \
           '(-h --help)'{-h,--help}'[show help]'
         ;;
-      list)
+      list|ls)
         _arguments '(-h --help)'{-h,--help}'[show help]'
         ;;
       switch|info)
@@ -1579,7 +1580,9 @@ function version() {
 }
 
 function help(command, subcommand) {
-  const topic = [command, subcommand].filter(Boolean).join(" ")
+  const aliases = { ls: "list" }
+  const requested = [command, subcommand].filter(Boolean).join(" ")
+  const topic = aliases[requested] ?? requested
   const texts = {
     "": `gwt ${version()} - lightweight native Git worktree workflows
 
@@ -1589,7 +1592,7 @@ Usage:
 Commands:
   new       Create and set up a worktree
   setup     Set up an existing worktree
-  list      List registered worktrees
+  list      List registered worktrees (alias: ls)
   switch    Switch the current shell to a worktree
   info      Show worktree details and assigned ports
   remove    Safely remove a worktree and optionally its branch
@@ -1664,15 +1667,17 @@ Examples:
 
 Usage:
   gwt list
+  gwt ls
 
 Options:
   -h, --help      Show help for this command.
 
 The current worktree is marked with '*'. Native worktrees that have not been
-set up by gwt are shown as unmanaged.
+set up by gwt are shown as unmanaged. 'gwt ls' is an alias for 'gwt list'.
 
-Example:
-  gwt list`,
+Examples:
+  gwt list
+  gwt ls`,
     switch: `Switch the current shell to another worktree.
 
 Usage:
@@ -1905,7 +1910,7 @@ async function main() {
   }
   if (command === "new") return commandNew(args)
   if (command === "setup") return commandSetup(args)
-  if (command === "list") return commandList(args)
+  if (command === "list" || command === "ls") return commandList(args)
   if (command === "switch") return commandSwitch(args)
   if (command === "info") return commandInfo(args)
   if (command === "remove") return commandRemove(args)

@@ -599,6 +599,20 @@ describe("worktree lifecycle", () => {
     assert.match(git(fixture.repository, "branch", "--list", "feature/unmerged"), /feature\/unmerged/)
   })
 
+  test("aliases ls to list", () => {
+    const fixture = createRepository()
+    const created = gwt(fixture, ["new", "feature/alias"])
+    assert.equal(created.status, 0, created.stderr)
+
+    const list = gwt(fixture, ["list"])
+    const ls = gwt(fixture, ["ls"])
+    assert.equal(ls.status, 0, ls.stderr)
+    assert.equal(ls.stdout, list.stdout)
+    assert.match(gwt(fixture, ["ls", "--help"]).stdout, /Usage:\n {2}gwt list\n {2}gwt ls/)
+    assert.match(gwt(fixture, ["help", "ls"]).stdout, /Usage:\n {2}gwt list/)
+    assert.match(gwt(fixture, []).stdout, /list\s+List registered worktrees \(alias: ls\)/)
+  })
+
   test("adopts a native linked worktree during setup", () => {
     const fixture = createRepository()
     writeConfig(fixture.repository, { ports: ["APP_PORT"] })
@@ -626,6 +640,8 @@ describe("shell integration", () => {
     assert.match(result.stdout, /chpwd_functions/)
     assert.match(result.stdout, /compdef _gwt gwt/)
     assert.match(result.stdout, /__complete worktrees/)
+    assert.match(result.stdout, /'ls:List worktrees'/)
+    assert.match(result.stdout, /list\|ls\)/)
   })
 
   test("loads worktree environment silently and restores the previous shell", () => {

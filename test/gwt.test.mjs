@@ -782,6 +782,21 @@ describe("worktree lifecycle", () => {
     assert.equal(git(fixture.repository, "branch", "--list", metadata.scratchBranch), "")
   })
 
+  test("lists and inspects a worktree whose directory was deleted outside gwt", () => {
+    const fixture = createRepository()
+    assert.equal(gwt(fixture, ["new", "feature/doomed"]).status, 0)
+    const [metadata] = readMetadata(fixture.repository)
+    rmSync(metadata.path, { recursive: true, force: true })
+
+    const listed = gwt(fixture, ["list"])
+    assert.equal(listed.status, 0, listed.stderr)
+    assert.match(listed.stdout, /feature\/doomed/)
+
+    const info = gwt(fixture, ["info", metadata.id])
+    assert.equal(info.status, 0, info.stderr)
+    assert.match(info.stdout, new RegExp(`Path: ${metadata.path}`))
+  })
+
   test("adopts a native linked worktree during setup", () => {
     const fixture = createRepository()
     writeConfig(fixture.repository, { ports: ["APP_PORT"] })

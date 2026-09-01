@@ -404,7 +404,7 @@ function metadataForWorktree(repository, worktree) {
 function currentWorktree(repository, cwd = process.cwd()) {
   const resolvedCwd = canonical(cwd)
   return repository.worktrees
-    .filter((worktree) => isInside(canonical(worktree.path), resolvedCwd))
+    .filter((worktree) => pathExists(worktree.path) && isInside(canonical(worktree.path), resolvedCwd))
     .sort((left, right) => right.path.length - left.path.length)[0] ?? null
 }
 
@@ -1193,7 +1193,7 @@ function commandInfo(args) {
   const worktree = resolveWorktree(repository, args[0])
   const metadata = metadataForWorktree(repository, worktree)
   console.log(`ID: ${metadata?.id ?? (resolve(worktree.path) === resolve(repository.primaryPath) ? "primary" : "unmanaged")}`)
-  console.log(`Path: ${canonical(worktree.path)}`)
+  console.log(`Path: ${pathExists(worktree.path) ? canonical(worktree.path) : resolve(worktree.path)}`)
   console.log(`Branch: ${worktree.branch ?? "(detached)"}`)
   console.log(`HEAD: ${worktree.head}`)
   console.log(`Setup: ${jobStatus(metadata) ?? "unmanaged"}`)

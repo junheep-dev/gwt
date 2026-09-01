@@ -216,8 +216,8 @@ nothing else from the configuration.
 ## Commands
 
 ```sh
-gwt new [branch] [--base <ref>] [--no-hooks]
-gwt setup [id|branch|path] [--no-hooks]
+gwt new [branch] [--base <ref>] [--no-hooks] [--background]
+gwt setup [id|branch|path] [--no-hooks] [--background]
 gwt list
 gwt ls
 gwt switch [primary|id|branch|path] [--create]
@@ -247,6 +247,16 @@ already checked out in another worktree is reported with its path.
 Setup failures retain the worktree and record the failure. Retry with
 `gwt setup <id>` or remove it explicitly.
 
+`gwt new --background` and `gwt setup --background` copy files, assign ports,
+and ask for configuration approval before returning, then run `postCreate` in a
+detached process, so an integrated shell enters the worktree immediately.
+Output goes to `.git/gwt/logs/<id>.log`. `gwt list` shows the worktree as
+`running` until the hook finishes. A job whose process disappears is reported
+as `interrupted` and can be retried with `gwt setup <id>`. `--background` cannot be combined with `--no-hooks`, and a
+worktree cannot be set up or removed while its background setup is running.
+
+`gwt ls` is an alias for `gwt list`.
+
 When `gwt switch` is given a branch that has no worktree, it offers to create
 one, reusing an existing branch or tracking a remote one just like `gwt new`.
 `--create` skips the question, which is required when running non-interactively.
@@ -257,8 +267,6 @@ ID, or path. Enter switches to the selected worktree. Escape leaves filter
 mode or cancels the picker. `primary` is a reserved ID for the repository's
 primary worktree, so `gwt switch primary` returns to it from any linked
 worktree.
-
-`gwt ls` is an alias for `gwt list`.
 
 `gwt remove` refuses dirty worktrees and first tries to delete the branch with
 `git branch -d`. If Git rejects safe deletion, an interactive terminal asks

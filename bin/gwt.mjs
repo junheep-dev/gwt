@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 
-import { spawnSync } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { createHash, randomBytes } from "node:crypto"
 import {
   accessSync,
   chmodSync,
+  closeSync,
   constants,
   copyFileSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -27,6 +29,7 @@ const PROJECT_CONFIG_FILE = ".gwt.json"
 const PORT_MIN = 20_000
 const PORT_MAX = 39_999
 const PICKER_ESCAPE_CODE_TIMEOUT_MS = 50
+const JOB_START_GRACE_MS = 30_000
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 const SHELL_ENV_STATE = "GWT_SHELL_ENV_STATE"
 const DEFAULT_CONFIG = { copyFiles: [], ports: [], env: {} }
@@ -348,6 +351,25 @@ function metadataPath(repository, id) {
   return join(metadataDirectory(repository), `${id}.json`)
 }
 
+function setupLogPath(repository, id) {
+  return join(repository.commonDir, "gwt", "logs", `${id}.log`)
+}
+
+function jobStatus(metadata) {
+  if (metadata?.setup !== "running") return metadata?.setup
+  const pid = metadata.job?.pid
+  if (!pid) {
+    const startedAt = Date.parse(metadata.job?.startedAt ?? "")
+    return Number.isNaN(startedAt) || Date.now() - startedAt < JOB_START_GRACE_MS ? "running" : "interrupted"
+  }
+  try {
+    process.kill(pid, 0)
+    return "running"
+  } catch (error) {
+    return error.code === "EPERM" ? "running" : "interrupted"
+  }
+}
+
 function readJson(path) {
   try {
     return JSON.parse(readFileSync(path, "utf8"))
@@ -409,6 +431,7 @@ function findWorktree(repository, selector, options = {}) {
   const candidatePath = resolve(options.cwd ?? process.cwd(), selector)
   return repository.worktrees.find((worktree) => resolve(worktree.path) === candidatePath) ?? null
 }
+
 function resolveWorktree(repository, selector, options = {}) {
   const worktree = findWorktree(repository, selector, options)
   if (!worktree) throw new CliError(`No worktree matches '${selector}'`)
@@ -623,6 +646,33 @@ function updateMetadata(repository, metadata, update) {
   return next
 }
 
+function startBackgroundHook(repository, metadata) {
+  const path = setupLogPath(repository, metadata.id)
+  mkdirSync(dirname(path), { recursive: true })
+
+  const started = updateMetadata(repository, metadata, {
+    setup: "running",
+    setupError: undefined,
+    job: { logPath: path, startedAt: new Date().toISOString() },
+  })
+
+  const descriptor = openSync(path, "w")
+  const environment = { ...process.env }
+  delete environment.GWT_CD_FILE
+  try {
+    const child = spawn(process.execPath, [import.meta.filename, "__run-hook", "postCreate", started.id], {
+      cwd: repository.primaryPath,
+      detached: true,
+      env: environment,
+      stdio: ["ignore", descriptor, descriptor],
+    })
+    child.unref()
+  } finally {
+    closeSync(descriptor)
+  }
+  return started
+}
+
 async function setupWorktree(repository, configDocument, worktree, options = {}) {
   if (resolve(worktree.path) === resolve(repository.primaryPath)) throw new CliError("The primary worktree does not need setup")
   const targetPath = canonical(worktree.path)
@@ -651,11 +701,12 @@ async function setupWorktree(repository, configDocument, worktree, options = {})
       return metadata
     }
     await ensureTrusted(repository, configDocument, targetPath)
+    if (options.background && configDocument.value.postCreate) return startBackgroundHook(repository, metadata)
     runHook("postCreate", repository, configDocument, worktree, metadata)
-    metadata = updateMetadata(repository, metadata, { setup: "complete" })
+    metadata = updateMetadata(repository, metadata, { setup: "complete", setupError: undefined, job: undefined })
     return metadata
   } catch (error) {
-    updateMetadata(repository, metadata, { setup: "failed", setupError: error.message })
+    updateMetadata(repository, metadata, { setup: "failed", setupError: error.message, job: undefined })
     throw error
   }
 }
@@ -684,9 +735,11 @@ function isBranchName(branch, cwd) {
   const result = git(["check-ref-format", "--branch", branch], cwd, { allowFailure: true })
   return result.status === 0 && result.stdout.trim() === branch
 }
+
 function validateBranchName(branch, cwd) {
   if (!isBranchName(branch, cwd)) throw new CliError(`Invalid branch name: ${branch}`)
 }
+
 function branchState(repository, branch) {
   const remoteNames = git(["remote"], repository.primaryPath).stdout.split("\n").filter(Boolean)
   const localRef = `refs/heads/${branch}`
@@ -707,9 +760,11 @@ function branchState(repository, branch) {
   }
   return { local, remotes: [...new Set(remotes)].sort() }
 }
+
 function localBranch(repository, branch) {
   return branchState(repository, branch).local
 }
+
 function resolveBranchTarget(repository, branch, explicitBase) {
   validateBranchName(branch, repository.primaryPath)
   const { local, remotes } = branchState(repository, branch)
@@ -732,11 +787,13 @@ function resolveBranchTarget(repository, branch, explicitBase) {
   }
   return { origin: "new", branch }
 }
+
 function worktreeAddArguments(target, resolution, base) {
   if (resolution.origin === "existing") return ["worktree", "add", target, resolution.branch]
   if (resolution.origin === "remote") return ["worktree", "add", "--track", "-b", resolution.branch, target, resolution.remoteRef]
   return ["worktree", "add", "-b", resolution.branch, target, base]
 }
+
 function branchSummary(resolution) {
   if (resolution.origin === "existing") return `Branch: ${resolution.branch} (existing)`
   if (resolution.origin === "remote") return `Branch: ${resolution.branch} (new, tracking ${resolution.remoteRef})`
@@ -805,6 +862,7 @@ async function createWorktree(repository, configDocument, options = {}) {
     const metadata = await setupWorktree(refreshed, configDocument, worktree, {
       id,
       noHooks: options.noHooks,
+      background: options.background,
       scratchBranch: scratch ? branch : undefined,
     })
     return { metadata, targetPath, resolution }
@@ -815,18 +873,25 @@ async function createWorktree(repository, configDocument, options = {}) {
     throw error
   }
 }
+
 function reportWorktree({ metadata, targetPath, resolution }) {
   console.log(`Worktree ${metadata.id} is ready at ${targetPath}`)
   console.log(branchSummary(resolution))
   for (const [name, port] of Object.entries(metadata.ports)) console.log(`${name}: ${port}`)
+  if (metadata.setup === "running") {
+    console.log(`Setup is running in the background; log: ${metadata.job.logPath}`)
+  }
   writeCdDirective(targetPath)
 }
+
 async function commandNew(args) {
   const { options, positionals } = parseOptions(args, {
     "--base": "value",
     "--no-hooks": "boolean",
+    "--background": "boolean",
   })
-  if (positionals.length > 1) throw new CliError("Usage: gwt new [branch] [--base <ref>] [--no-hooks]")
+  if (positionals.length > 1) throw new CliError("Usage: gwt new [branch] [--base <ref>] [--no-hooks] [--background]")
+  if (options.background && options["no-hooks"]) throw new CliError("--background and --no-hooks cannot be combined")
   const repository = discoverRepository()
   const configDocument = loadConfig(repository)
 
@@ -834,6 +899,7 @@ async function commandNew(args) {
     branch: positionals[0],
     base: options.base,
     noHooks: options["no-hooks"],
+    background: options.background,
   }))
 }
 
@@ -846,7 +912,7 @@ function linkedWorktreeRows(repository, metadata = loadMetadata(repository)) {
       current: current && resolve(current.path) === resolve(worktree.path),
       id: item?.id ?? (index === 0 ? "primary" : "-"),
       branch: worktree.branch ?? "(detached)",
-      setup: item?.setup ?? (index === 0 ? "-" : "unmanaged"),
+      setup: jobStatus(item) ?? (index === 0 ? "-" : "unmanaged"),
       path: worktree.path,
     }
   })
@@ -989,6 +1055,7 @@ async function chooseWorktree(repository) {
 function looksLikePath(selector) {
   return isAbsolute(selector) || selector.startsWith(".")
 }
+
 async function createMissingWorktree(repository, selector, force) {
   const unmatched = new CliError(`No worktree matches '${selector}'`)
   if (looksLikePath(selector) || !isBranchName(selector, repository.primaryPath)) throw unmatched
@@ -1005,6 +1072,7 @@ async function createMissingWorktree(repository, selector, force) {
 
   return createWorktree(repository, loadConfig(repository), { branch: selector })
 }
+
 async function commandSwitch(args) {
   const { options, positionals } = parseOptions(args, { "--create": "boolean" })
   if (positionals.length > 1) throw new CliError("Usage: gwt switch [primary|id|branch|path] [--create]")
@@ -1128,20 +1196,31 @@ function commandInfo(args) {
   console.log(`Path: ${canonical(worktree.path)}`)
   console.log(`Branch: ${worktree.branch ?? "(detached)"}`)
   console.log(`HEAD: ${worktree.head}`)
-  console.log(`Setup: ${metadata?.setup ?? "unmanaged"}`)
+  console.log(`Setup: ${jobStatus(metadata) ?? "unmanaged"}`)
   for (const [name, port] of Object.entries(metadata?.ports ?? {})) console.log(`${name}: ${port}`)
   if (metadata?.setupError) console.log(`Setup error: ${metadata.setupError}`)
 }
 
 async function commandSetup(args) {
-  const { options, positionals } = parseOptions(args, { "--no-hooks": "boolean" })
-  if (positionals.length > 1) throw new CliError("Usage: gwt setup [id|branch|path] [--no-hooks]")
+  const { options, positionals } = parseOptions(args, { "--no-hooks": "boolean", "--background": "boolean" })
+  if (positionals.length > 1) throw new CliError("Usage: gwt setup [id|branch|path] [--no-hooks] [--background]")
+  if (options.background && options["no-hooks"]) throw new CliError("--background and --no-hooks cannot be combined")
   const repository = discoverRepository()
   const configDocument = loadConfig(repository)
   const worktree = resolveWorktree(repository, positionals[0])
-  const metadata = await setupWorktree(repository, configDocument, worktree, { noHooks: options["no-hooks"] })
+
+  const existing = metadataForWorktree(repository, worktree)
+  if (jobStatus(existing) === "running") {
+    throw new CliError(`Setup is already running for ${existing.id} (pid ${existing.job?.pid ?? "starting"})`)
+  }
+
+  const metadata = await setupWorktree(repository, configDocument, worktree, {
+    noHooks: options["no-hooks"],
+    background: options.background,
+  })
   console.log(`Setup ${metadata.setup}: ${metadata.id}`)
   for (const [name, port] of Object.entries(metadata.ports)) console.log(`${name}: ${port}`)
+  if (metadata.setup === "running") console.log(`Log: ${metadata.job.logPath}`)
 }
 
 async function confirmDiscard(worktree) {
@@ -1154,6 +1233,7 @@ function scratchBranchIsContained(repository, metadata, worktree) {
   if (!scratch || scratch === worktree.branch || !worktree.head) return false
   return git(["merge-base", "--is-ancestor", scratch, worktree.head], repository.primaryPath, { allowFailure: true }).status === 0
 }
+
 async function removeScratchBranch(repository, metadata, worktree, options, contained) {
   const scratch = metadata?.scratchBranch
   if (!scratch || scratch === worktree.branch || options["keep-branch"]) return null
@@ -1172,6 +1252,7 @@ async function removeScratchBranch(repository, metadata, worktree, options, cont
   }
   return `Kept scratch branch: ${scratch}\nDelete later: git branch -D -- ${scratch}`
 }
+
 async function commandRemove(args) {
   const { options, positionals } = parseOptions(args, {
     "--keep-branch": "boolean",
@@ -1186,6 +1267,9 @@ async function commandRemove(args) {
   if (resolve(worktree.path) === resolve(repository.primaryPath)) throw new CliError("The primary worktree cannot be removed")
   const targetPath = canonical(worktree.path)
   const metadata = metadataForWorktree(repository, worktree)
+  if (jobStatus(metadata) === "running" && !options.discard) {
+    throw new CliError(`Setup is still running for ${metadata.id} (pid ${metadata.job?.pid ?? "starting"})\nWait for it to finish, or force removal with --discard`)
+  }
   const scratchContained = scratchBranchIsContained(repository, metadata, worktree)
   const dirty = git(["status", "--porcelain"], worktree.path).stdout.length > 0
   if (dirty && !options.discard) throw new CliError("Worktree has uncommitted changes; commit them or use --discard")
@@ -1206,6 +1290,10 @@ async function commandRemove(args) {
   console.log(`Removing worktree ${metadata?.id ?? targetPath}...`)
   git(removeArgs, repository.primaryPath)
   if (metadata?.metadataPath && existsSync(metadata.metadataPath)) unlinkSync(metadata.metadataPath)
+  if (metadata?.id) {
+    const log = setupLogPath(repository, metadata.id)
+    if (existsSync(log)) unlinkSync(log)
+  }
 
   let branchMessage = "No branch to delete"
   if (worktree.branch && !options["keep-branch"]) {
@@ -1488,12 +1576,14 @@ if command -v gwt >/dev/null 2>&1; then
           '2:branch name:_gwt_refs' \
           '--base[base Git revision]:revision:_gwt_refs' \
           '--no-hooks[skip project hooks]' \
+          '--background[run postCreate in the background]' \
           '(-h --help)'{-h,--help}'[show help]'
         ;;
       setup)
         _arguments \
           '2:worktree:_gwt_worktrees' \
           '--no-hooks[skip project hooks]' \
+          '--background[run postCreate in the background]' \
           '(-h --help)'{-h,--help}'[show help]'
         ;;
       list|ls)
@@ -1690,6 +1780,39 @@ async function commandShell(args) {
   throw new CliError("Usage: gwt shell install zsh [--dry-run] [--yes]")
 }
 
+function commandRunHook(args) {
+  if (args.length !== 2 || args[0] !== "postCreate") throw new CliError("Invalid hook request")
+  const repository = discoverRepository()
+  const metadata = loadMetadata(repository).find((item) => item.id === args[1])
+  if (!metadata) throw new CliError(`No worktree metadata for ${args[1]}`)
+  const worktree = repository.worktrees.find((item) => resolve(item.path) === resolve(metadata.path))
+  if (!worktree) throw new CliError(`Worktree ${metadata.id} is no longer registered with Git`)
+
+  const configDocument = loadConfig(repository)
+  const claimed = updateMetadata(repository, metadata, { job: { ...metadata.job, pid: process.pid } })
+  const finish = (update) => {
+    if (!existsSync(metadataPath(repository, claimed.id))) return
+    updateMetadata(repository, claimed, {
+      ...update,
+      job: { ...claimed.job, finishedAt: new Date().toISOString() },
+    })
+  }
+
+  try {
+    if (configDocument.requiresTrust) {
+      const fingerprint = trustFingerprint(repository, configDocument, canonical(worktree.path))
+      if (!isTrusted(repository, fingerprint)) {
+        throw new CliError("Project configuration is not trusted. Run 'gwt trust' to approve it")
+      }
+    }
+    runHook("postCreate", repository, configDocument, worktree, claimed)
+    finish({ setup: "complete", setupError: undefined })
+  } catch (error) {
+    finish({ setup: "failed", setupError: error.message })
+    throw error
+  }
+}
+
 function commandComplete(args) {
   if (args.length !== 1) throw new CliError("Invalid completion request")
 
@@ -1765,7 +1888,7 @@ Run 'gwt <command> --help' for command behavior and more examples.`,
     new: `Create a worktree, prepare its development environment, and switch to it.
 
 Usage:
-  gwt new [branch] [--base <ref>] [--no-hooks]
+  gwt new [branch] [--base <ref>] [--no-hooks] [--background]
 
 Arguments:
   branch          Branch to check out. An existing local branch is reused, a
@@ -1778,6 +1901,7 @@ Options:
                   configured base or the primary worktree's current commit.
                   Rejected when the branch already exists locally.
   --no-hooks      Copy files and allocate ports, but skip postCreate.
+  --background    Run postCreate detached so the shell returns immediately.
   -h, --help      Show help for this command.
 
 Behavior:
@@ -1791,33 +1915,41 @@ Behavior:
   name collision.
 
   A branch already checked out in another worktree is refused; switch to that
-  worktree instead.
+  worktree instead. With --background, files are copied, ports are assigned,
+  and project configuration is approved before postCreate is detached, so the
+  worktree is usable right away. 'gwt list' shows it as running until the
+  hook finishes, and its output is written to .git/gwt/logs/<id>.log.
 
 Examples:
   gwt new feature/auth
   gwt new
   gwt new hotfix/login --base origin/main
-  gwt new feature/from-remote`,
+  gwt new feature/from-remote
+  gwt new heavy-project --background`,
     setup: `Prepare an existing linked worktree using the active gwt configuration.
 
 Usage:
-  gwt setup [id|branch|path] [--no-hooks]
+  gwt setup [id|branch|path] [--no-hooks] [--background]
 
 Arguments:
   id|branch|path  Worktree to set up. Defaults to the current worktree.
 
 Options:
   --no-hooks      Copy files and allocate ports, but skip postCreate.
+  --background    Run postCreate detached so the shell returns immediately.
   -h, --help      Show help for this command.
 
 Behavior:
   Use this to adopt a worktree created with native 'git worktree add' or to
   retry a failed setup. Existing copied files and assigned ports are preserved.
+  Setup refuses to start while a background setup is already running for the
+  same worktree.
 
 Examples:
   gwt setup
   gwt setup feature/auth
-  gwt setup a1b2c3d4 --no-hooks`,
+  gwt setup a1b2c3d4 --no-hooks
+  gwt setup a1b2c3d4 --background`,
     list: `List Git worktrees together with gwt IDs and setup status.
 
 Usage:
@@ -1910,9 +2042,7 @@ Behavior:
   Removal refuses to run while a background setup is still in progress; use
   --discard to force it. Configuration approval is requested only when
   preRemove is configured, because removal applies nothing else from the
-  configuration. Configuration
-  approval is requested only when preRemove is configured, because removal
-  applies nothing else from the configuration.
+  configuration.
 
 Examples:
   gwt remove
@@ -2092,6 +2222,7 @@ async function main() {
   if (command === "shell") return commandShell(args)
   if (command === "skill") return commandSkill(args)
   if (command === "__complete") return commandComplete(args)
+  if (command === "__run-hook") return commandRunHook(args)
   if (command === "__shell_env") return commandShellEnvironment(args)
   throw new CliError(`Unknown command: ${command}`)
 }

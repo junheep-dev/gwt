@@ -4,6 +4,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSy
 import { tmpdir } from "node:os"
 import { basename, dirname, join, relative, resolve } from "node:path"
 import { afterEach, describe, test } from "node:test"
+import { setTimeout as delay } from "node:timers/promises"
 import { mkdtempSync, rmSync } from "node:fs"
 
 const cli = resolve(import.meta.dirname, "../bin/gwt.mjs")
@@ -82,11 +83,21 @@ function writeUserConfig(fixture, value, identifier = realpathSync(fixture.repos
 function metadataFiles(repository) {
   const commonDir = git(repository, "rev-parse", "--path-format=absolute", "--git-common-dir")
   const directory = join(commonDir, "gwt", "worktrees")
-  return readdirSync(directory).map((name) => join(directory, name))
+  return readdirSync(directory).filter((name) => name.endsWith(".json")).map((name) => join(directory, name))
 }
 
 function readMetadata(repository) {
   return metadataFiles(repository).map((path) => JSON.parse(readFileSync(path, "utf8")))
+}
+
+async function waitForMetadata(repository, predicate, timeout = 30_000) {
+  const deadline = Date.now() + timeout
+  for (;;) {
+    const found = readMetadata(repository).find(predicate)
+    if (found) return found
+    assert.ok(Date.now() < deadline, "timed out waiting for background setup")
+    await delay(50)
+  }
 }
 
 afterEach(() => {
@@ -787,6 +798,130 @@ describe("worktree lifecycle", () => {
   })
 })
 
+describe("background setup", () => {
+  function writeGatedHook(fixture, body) {
+    mkdirSync(join(fixture.repository, "scripts"), { recursive: true })
+    const hook = join(fixture.repository, "scripts", "gated")
+    writeFileSync(hook, [
+      "#!/bin/sh",
+      "printf 'hook started\\n'",
+      "attempts=0",
+      'while [ ! -f "$GWT_PRIMARY_PATH/release" ]; do',
+      "  attempts=$((attempts+1))",
+      "  [ $attempts -gt 600 ] && exit 9",
+      "  sleep 0.05",
+      "done",
+      body,
+      "",
+    ].join("\n"))
+    chmodSync(hook, 0o755)
+    writeConfig(fixture.repository, { postCreate: "scripts/gated" })
+    git(fixture.repository, "add", "scripts/gated")
+    git(fixture.repository, "commit", "-m", "Add gated hook")
+    assert.equal(gwt(fixture, ["trust"]).status, 0)
+  }
+
+  function release(fixture) {
+    writeFileSync(join(fixture.repository, "release"), "")
+  }
+
+  test("returns before postCreate finishes and completes in the background", async () => {
+    const fixture = createRepository()
+    writeGatedHook(fixture, "printf 'hook finished\\n' > background-ran")
+
+    const created = gwt(fixture, ["new", "feature/bg", "--background"])
+    assert.equal(created.status, 0, created.stderr)
+    assert.match(created.stdout, /Setup is running in the background/)
+
+    const running = await waitForMetadata(fixture.repository, (item) => item.setup === "running" && item.job?.pid)
+    assert.match(gwt(fixture, ["list"]).stdout, /running/)
+    assert.match(gwt(fixture, ["info", running.id]).stdout, /^Setup: running$/m)
+    assert.equal(existsSync(join(running.path, "background-ran")), false)
+
+    release(fixture)
+    const done = await waitForMetadata(fixture.repository, (item) => item.setup === "complete")
+    assert.equal(existsSync(join(done.path, "background-ran")), true)
+    assert.match(readFileSync(done.job.logPath, "utf8"), /hook started/)
+    assert.match(gwt(fixture, ["info", done.id]).stdout, /^Setup: complete$/m)
+  })
+
+  test("records a failing background hook", async () => {
+    const fixture = createRepository()
+    writeGatedHook(fixture, 'printf "boom\\n" >&2\nexit 7')
+
+    assert.equal(gwt(fixture, ["new", "feature/bg-fail", "--background"]).status, 0)
+    await waitForMetadata(fixture.repository, (item) => item.setup === "running" && item.job?.pid)
+    release(fixture)
+
+    const failed = await waitForMetadata(fixture.repository, (item) => item.setup === "failed")
+    assert.match(failed.setupError, /postCreate failed with status 7/)
+    assert.match(gwt(fixture, ["info", failed.id]).stdout, /^Setup: failed$/m)
+    assert.match(readFileSync(failed.job.logPath, "utf8"), /boom/)
+  })
+
+  test("reports a background setup whose process disappeared as interrupted", async () => {
+    const fixture = createRepository()
+    writeGatedHook(fixture, "printf 'never\\n'")
+
+    assert.equal(gwt(fixture, ["new", "feature/bg-killed", "--background"]).status, 0)
+    const running = await waitForMetadata(fixture.repository, (item) => item.setup === "running" && item.job?.pid)
+    process.kill(running.job.pid, "SIGKILL")
+
+    const deadline = Date.now() + 10_000
+    let listed = gwt(fixture, ["list"])
+    while (!/interrupted/.test(listed.stdout) && Date.now() < deadline) {
+      await delay(50)
+      listed = gwt(fixture, ["list"])
+    }
+    assert.match(listed.stdout, /interrupted/)
+    assert.match(gwt(fixture, ["info", running.id]).stdout, /^Setup: interrupted$/m)
+
+    const retried = gwt(fixture, ["setup", running.id, "--no-hooks"])
+    assert.equal(retried.status, 0, retried.stderr)
+  })
+
+  test("refuses concurrent setup and removal while a background setup runs", async () => {
+    const fixture = createRepository()
+    writeGatedHook(fixture, "printf 'done\\n'")
+
+    assert.equal(gwt(fixture, ["new", "feature/bg-busy", "--background"]).status, 0)
+    const running = await waitForMetadata(fixture.repository, (item) => item.setup === "running" && item.job?.pid)
+
+    const setup = gwt(fixture, ["setup", running.id])
+    assert.equal(setup.status, 1)
+    assert.match(setup.stderr, /Setup is already running/)
+
+    const removal = gwt(fixture, ["remove", running.id])
+    assert.equal(removal.status, 1)
+    assert.match(removal.stderr, /Setup is still running/)
+    assert.equal(existsSync(running.path), true)
+
+    release(fixture)
+    const done = await waitForMetadata(fixture.repository, (item) => item.setup === "complete")
+    const removed = gwt(fixture, ["remove", done.id])
+    assert.equal(removed.status, 0, removed.stderr)
+    assert.equal(existsSync(done.job.logPath), false)
+  })
+
+  test("runs synchronously when no postCreate is configured", () => {
+    const fixture = createRepository()
+    const created = gwt(fixture, ["new", "feature/no-hook", "--background"])
+    assert.equal(created.status, 0, created.stderr)
+    assert.doesNotMatch(created.stdout, /background/)
+    const [metadata] = readMetadata(fixture.repository)
+    assert.equal(metadata.setup, "complete")
+    assert.equal(metadata.job, undefined)
+  })
+
+  test("refuses --background with --no-hooks", () => {
+    const fixture = createRepository()
+    const rejected = gwt(fixture, ["new", "feature/bad", "--background", "--no-hooks"])
+    assert.equal(rejected.status, 1)
+    assert.match(rejected.stderr, /--background and --no-hooks cannot be combined/)
+    assert.equal(existsSync(join(fixture.repository, ".git", "gwt", "worktrees")), false)
+  })
+})
+
 describe("shell integration", () => {
   test("emits a zsh wrapper with environment synchronization and completion", () => {
     const fixture = createRepository()
@@ -801,6 +936,7 @@ describe("shell integration", () => {
     assert.match(result.stdout, /'ls:List worktrees'/)
     assert.match(result.stdout, /list\|ls\)/)
     assert.match(result.stdout, /--create\[create a worktree for a branch without one\]/)
+    assert.match(result.stdout, /--background\[run postCreate in the background\]/)
   })
 
   test("loads worktree environment silently and restores the previous shell", () => {

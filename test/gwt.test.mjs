@@ -719,6 +719,58 @@ describe("worktree lifecycle", () => {
     assert.equal(existsSync(join(fixture.repository, ".git", "gwt", "worktrees")), false)
   })
 
+  test("deletes a scratch branch the worktree moved away from", () => {
+    const fixture = createRepository()
+    const created = gwt(fixture, ["new"])
+    assert.equal(created.status, 0, created.stderr)
+    const [metadata] = readMetadata(fixture.repository)
+    assert.match(metadata.scratchBranch, /^scratch\/[a-f0-9]{8}$/)
+    git(metadata.path, "checkout", "-b", "feature/moved-on")
+
+    const removed = gwt(fixture, ["remove", metadata.id])
+    assert.equal(removed.status, 0, removed.stderr)
+    assert.match(removed.stdout, /Deleted branch: feature\/moved-on/)
+    assert.match(removed.stdout, new RegExp(`Deleted scratch branch: ${metadata.scratchBranch}`))
+    assert.equal(git(fixture.repository, "branch", "--list", metadata.scratchBranch), "")
+  })
+
+  test("keeps a scratch branch when the branch is kept or cannot be deleted safely", () => {
+    const fixture = createRepository()
+    assert.equal(gwt(fixture, ["new"]).status, 0)
+    const [kept] = readMetadata(fixture.repository)
+    git(kept.path, "checkout", "-b", "feature/keeper")
+    const keptRemoval = gwt(fixture, ["remove", kept.id, "--keep-branch"])
+    assert.equal(keptRemoval.status, 0, keptRemoval.stderr)
+    assert.doesNotMatch(keptRemoval.stdout, /scratch branch/)
+    assert.match(git(fixture.repository, "branch", "--list", kept.scratchBranch), /scratch\//)
+
+    assert.equal(gwt(fixture, ["new"]).status, 0)
+    const [stranded] = readMetadata(fixture.repository)
+    writeFileSync(join(stranded.path, "work.txt"), "stranded\n")
+    git(stranded.path, "add", "work.txt")
+    git(stranded.path, "commit", "-m", "Scratch work")
+    git(stranded.path, "checkout", "-b", "feature/left-behind", "HEAD~1")
+    const removed = gwt(fixture, ["remove", stranded.id])
+    assert.equal(removed.status, 0, removed.stderr)
+    assert.match(removed.stdout, new RegExp(`Kept scratch branch: ${stranded.scratchBranch}`))
+    assert.match(removed.stdout, /Delete later: git branch -D -- scratch\//)
+  })
+
+  test("deletes a scratch branch whose commits moved onto the new branch", () => {
+    const fixture = createRepository()
+    assert.equal(gwt(fixture, ["new"]).status, 0)
+    const [metadata] = readMetadata(fixture.repository)
+    writeFileSync(join(metadata.path, "work.txt"), "carried\n")
+    git(metadata.path, "add", "work.txt")
+    git(metadata.path, "commit", "-m", "Scratch work")
+    git(metadata.path, "checkout", "-b", "feature/carried")
+
+    const removed = gwt(fixture, ["remove", metadata.id])
+    assert.equal(removed.status, 0, removed.stderr)
+    assert.match(removed.stdout, new RegExp(`Deleted scratch branch: ${metadata.scratchBranch}`))
+    assert.equal(git(fixture.repository, "branch", "--list", metadata.scratchBranch), "")
+  })
+
   test("adopts a native linked worktree during setup", () => {
     const fixture = createRepository()
     writeConfig(fixture.repository, { ports: ["APP_PORT"] })

@@ -640,6 +640,7 @@ async function setupWorktree(repository, configDocument, worktree, options = {})
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     }
+    if (options.scratchBranch) metadata.scratchBranch = options.scratchBranch
     writeJson(metadataPath(repository, id), metadata)
   }
 
@@ -804,6 +805,7 @@ async function createWorktree(repository, configDocument, options = {}) {
     const metadata = await setupWorktree(refreshed, configDocument, worktree, {
       id,
       noHooks: options.noHooks,
+      scratchBranch: scratch ? branch : undefined,
     })
     return { metadata, targetPath, resolution }
   } catch (error) {
@@ -1147,6 +1149,29 @@ async function confirmDiscard(worktree) {
   return ask("Type yes to continue [y/N] ")
 }
 
+function scratchBranchIsContained(repository, metadata, worktree) {
+  const scratch = metadata?.scratchBranch
+  if (!scratch || scratch === worktree.branch || !worktree.head) return false
+  return git(["merge-base", "--is-ancestor", scratch, worktree.head], repository.primaryPath, { allowFailure: true }).status === 0
+}
+async function removeScratchBranch(repository, metadata, worktree, options, contained) {
+  const scratch = metadata?.scratchBranch
+  if (!scratch || scratch === worktree.branch || options["keep-branch"]) return null
+  if (!localBranch(repository, scratch)) return null
+
+  const deleteArgs = ["branch", options.discard || contained ? "-D" : "-d", "--", scratch]
+  if (git(deleteArgs, repository.primaryPath, { allowFailure: true }).status === 0) {
+    return `Deleted scratch branch: ${scratch}`
+  }
+  if (!options.discard && !options.yes) {
+    console.log(`Scratch branch '${scratch}' could not be deleted safely.`)
+    if (await ask("Force-delete the scratch branch? [y/N] ")) {
+      git(["branch", "-D", "--", scratch], repository.primaryPath)
+      return `Deleted scratch branch: ${scratch}`
+    }
+  }
+  return `Kept scratch branch: ${scratch}\nDelete later: git branch -D -- ${scratch}`
+}
 async function commandRemove(args) {
   const { options, positionals } = parseOptions(args, {
     "--keep-branch": "boolean",
@@ -1161,6 +1186,7 @@ async function commandRemove(args) {
   if (resolve(worktree.path) === resolve(repository.primaryPath)) throw new CliError("The primary worktree cannot be removed")
   const targetPath = canonical(worktree.path)
   const metadata = metadataForWorktree(repository, worktree)
+  const scratchContained = scratchBranchIsContained(repository, metadata, worktree)
   const dirty = git(["status", "--porcelain"], worktree.path).stdout.length > 0
   if (dirty && !options.discard) throw new CliError("Worktree has uncommitted changes; commit them or use --discard")
   if (options.discard && !options.yes && !(await confirmDiscard(worktree))) throw new CliError("Removal cancelled")
@@ -1203,6 +1229,8 @@ async function commandRemove(args) {
 
   console.log(`Removed worktree: ${metadata?.id ?? targetPath}`)
   console.log(branchMessage)
+  const scratchMessage = await removeScratchBranch(repository, metadata, worktree, options, scratchContained)
+  if (scratchMessage) console.log(scratchMessage)
   if (wasCurrent) writeCdDirective(repository.primaryPath)
 }
 
@@ -1872,7 +1900,17 @@ Behavior:
   when 'git branch -d' considers deletion safe. If safe deletion fails, an
   interactive terminal asks whether to force-delete the branch; non-interactive
   use keeps it. The primary worktree cannot be removed. Removing the current
-  worktree returns an integrated shell to the primary worktree. Configuration
+  worktree returns an integrated shell to the primary worktree.
+
+  A worktree created without a branch argument records its scratch/<id> branch.
+  If the worktree later moved to another branch, removal deletes that leftover
+  scratch branch when the branch it moved to already contains every scratch
+  commit, so nothing is lost. A scratch branch holding commits that were left
+  behind is kept and reported instead. --keep-branch keeps it either way.
+  Removal refuses to run while a background setup is still in progress; use
+  --discard to force it. Configuration approval is requested only when
+  preRemove is configured, because removal applies nothing else from the
+  configuration. Configuration
   approval is requested only when preRemove is configured, because removal
   applies nothing else from the configuration.
 

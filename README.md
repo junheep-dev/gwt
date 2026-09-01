@@ -265,3 +265,11 @@ worktree.
 whether to force-delete the branch; non-interactive use keeps it and prints a
 command for deleting it later. `--discard --yes` explicitly allows dirty
 worktree removal and forced branch deletion.
+
+A worktree created without a branch argument records its `scratch/<id>` branch.
+If the worktree later moved to another branch, removal deletes that leftover
+scratch branch when the branch it moved to already contains every scratch
+commit, so nothing is lost. This is the usual `git checkout -b` case, which
+`git branch -d` alone would refuse because the commits are not on the primary
+branch. A scratch branch holding commits that were left behind is kept and
+reported instead. `--keep-branch` keeps it either way.

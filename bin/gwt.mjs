@@ -386,7 +386,7 @@ function currentWorktree(repository, cwd = process.cwd()) {
     .sort((left, right) => right.path.length - left.path.length)[0] ?? null
 }
 
-function resolveWorktree(repository, selector, options = {}) {
+function findWorktree(repository, selector, options = {}) {
   if (!selector) {
     const current = currentWorktree(repository)
     if (!current) throw new CliError("The current directory is not inside a registered worktree")
@@ -407,10 +407,12 @@ function resolveWorktree(repository, selector, options = {}) {
   if (branchMatch) return branchMatch
 
   const candidatePath = resolve(options.cwd ?? process.cwd(), selector)
-  const pathMatch = repository.worktrees.find((worktree) => resolve(worktree.path) === candidatePath)
-  if (pathMatch) return pathMatch
-
-  throw new CliError(`No worktree matches '${selector}'`)
+  return repository.worktrees.find((worktree) => resolve(worktree.path) === candidatePath) ?? null
+}
+function resolveWorktree(repository, selector, options = {}) {
+  const worktree = findWorktree(repository, selector, options)
+  if (!worktree) throw new CliError(`No worktree matches '${selector}'`)
+  return worktree
 }
 
 function generateId(repository, config) {
@@ -677,11 +679,67 @@ function ensureLocalExclude(repository, directory) {
   writeFileSync(infoExclude, `${current}${separator}${pattern}\n`)
 }
 
-function validateBranch(branch, cwd) {
+function isBranchName(branch, cwd) {
   const result = git(["check-ref-format", "--branch", branch], cwd, { allowFailure: true })
-  if (result.status !== 0) throw new CliError(`Invalid branch name: ${branch}`)
-  const exists = git(["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], cwd, { allowFailure: true }).status === 0
-  if (exists) throw new CliError(`Branch already exists: ${branch}`)
+  return result.status === 0 && result.stdout.trim() === branch
+}
+function validateBranchName(branch, cwd) {
+  if (!isBranchName(branch, cwd)) throw new CliError(`Invalid branch name: ${branch}`)
+}
+function branchState(repository, branch) {
+  const remoteNames = git(["remote"], repository.primaryPath).stdout.split("\n").filter(Boolean)
+  const localRef = `refs/heads/${branch}`
+  const remoteRefs = new Map(remoteNames.map((name) => [`refs/remotes/${name}/${branch}`, name]))
+  const raw = git([
+    "for-each-ref",
+    "--format=%(refname)%09%(worktreepath)",
+    localRef,
+    ...remoteRefs.keys(),
+  ], repository.primaryPath).stdout
+
+  let local = null
+  const remotes = []
+  for (const line of raw.split("\n").filter(Boolean)) {
+    const [refname, worktreePath = ""] = line.split("\t")
+    if (refname === localRef) local = { branch, worktreePath: worktreePath || null }
+    else if (remoteRefs.has(refname)) remotes.push(remoteRefs.get(refname))
+  }
+  return { local, remotes: [...new Set(remotes)].sort() }
+}
+function localBranch(repository, branch) {
+  return branchState(repository, branch).local
+}
+function resolveBranchTarget(repository, branch, explicitBase) {
+  validateBranchName(branch, repository.primaryPath)
+  const { local, remotes } = branchState(repository, branch)
+
+  if (local) {
+    if (local.worktreePath) {
+      throw new CliError(`Branch '${branch}' is already checked out at ${local.worktreePath}\nSwitch to it with: gwt switch ${branch}`)
+    }
+    if (explicitBase) {
+      throw new CliError(`Branch '${branch}' already exists, so --base would be ignored\nDrop --base to create a worktree for the existing branch`)
+    }
+    return { origin: "existing", branch }
+  }
+
+  if (explicitBase) return { origin: "new", branch }
+
+  if (remotes.length === 1) return { origin: "remote", branch, remoteRef: `${remotes[0]}/${branch}` }
+  if (remotes.length > 1) {
+    throw new CliError(`Branch '${branch}' exists on several remotes: ${remotes.join(", ")}\nChoose one with: gwt new ${branch} --base ${remotes[0]}/${branch}`)
+  }
+  return { origin: "new", branch }
+}
+function worktreeAddArguments(target, resolution, base) {
+  if (resolution.origin === "existing") return ["worktree", "add", target, resolution.branch]
+  if (resolution.origin === "remote") return ["worktree", "add", "--track", "-b", resolution.branch, target, resolution.remoteRef]
+  return ["worktree", "add", "-b", resolution.branch, target, base]
+}
+function branchSummary(resolution) {
+  if (resolution.origin === "existing") return `Branch: ${resolution.branch} (existing)`
+  if (resolution.origin === "remote") return `Branch: ${resolution.branch} (new, tracking ${resolution.remoteRef})`
+  return `Branch: ${resolution.branch}`
 }
 
 function writeCdDirective(path) {
@@ -709,25 +767,35 @@ function parseOptions(args, definitions = {}) {
   return { options, positionals }
 }
 
-async function commandNew(args) {
-  const { options, positionals } = parseOptions(args, { "--base": "value", "--no-hooks": "boolean" })
-  if (positionals.length > 1) throw new CliError("Usage: gwt new [branch] [--base <ref>] [--no-hooks]")
-  const repository = discoverRepository()
-  const configDocument = loadConfig(repository)
+async function createWorktree(repository, configDocument, options = {}) {
   ensureCopySources(repository, configDocument.value)
   const id = generateId(repository, configDocument.value)
-  const branch = positionals[0] ?? `scratch/${id}`
-  validateBranch(branch, repository.primaryPath)
-  const requestedBase = options.base ?? configDocument.value.base
-  const base = requestedBase
-    ? gitOutput(["rev-parse", "--verify", `${requestedBase}^{commit}`], repository.primaryPath)
-    : gitOutput(["rev-parse", "HEAD"], repository.primaryPath)
+  const scratch = !options.branch
+  const branch = options.branch ?? `scratch/${id}`
+
+  let resolution
+  if (scratch) {
+    validateBranchName(branch, repository.primaryPath)
+    if (localBranch(repository, branch)) throw new CliError(`Branch already exists: ${branch}`)
+    resolution = { origin: "new", branch }
+  } else {
+    resolution = resolveBranchTarget(repository, branch, options.base)
+  }
+
+  let base = null
+  if (resolution.origin === "new") {
+    const requestedBase = options.base ?? configDocument.value.base
+    base = requestedBase
+      ? gitOutput(["rev-parse", "--verify", `${requestedBase}^{commit}`], repository.primaryPath)
+      : gitOutput(["rev-parse", "HEAD"], repository.primaryPath)
+  }
+
   const target = join(resolveWorktreeDirectory(repository, configDocument.value), id)
   if (configDocument.value.worktreeDirectory) {
     ensureLocalExclude(repository, configDocument.value.worktreeDirectory)
   }
 
-  git(["worktree", "add", "-b", branch, target, base], repository.primaryPath, { stdio: "inherit" })
+  git(worktreeAddArguments(target, resolution, base), repository.primaryPath, { stdio: "inherit" })
   const targetPath = canonical(target)
   const refreshed = discoverRepository(repository.primaryPath)
   const worktree = refreshed.worktrees.find((item) => resolve(item.path) === targetPath)
@@ -735,18 +803,36 @@ async function commandNew(args) {
   try {
     const metadata = await setupWorktree(refreshed, configDocument, worktree, {
       id,
-      noHooks: options["no-hooks"],
+      noHooks: options.noHooks,
     })
-    console.log(`Worktree ${metadata.id} is ready at ${targetPath}`)
-    console.log(`Branch: ${branch}`)
-    for (const [name, port] of Object.entries(metadata.ports)) console.log(`${name}: ${port}`)
-    writeCdDirective(targetPath)
+    return { metadata, targetPath, resolution }
   } catch (error) {
     console.error(`Setup failed; worktree retained at ${targetPath}`)
     console.error(`Retry: gwt setup ${id}`)
     console.error(`Remove: gwt remove ${id}`)
     throw error
   }
+}
+function reportWorktree({ metadata, targetPath, resolution }) {
+  console.log(`Worktree ${metadata.id} is ready at ${targetPath}`)
+  console.log(branchSummary(resolution))
+  for (const [name, port] of Object.entries(metadata.ports)) console.log(`${name}: ${port}`)
+  writeCdDirective(targetPath)
+}
+async function commandNew(args) {
+  const { options, positionals } = parseOptions(args, {
+    "--base": "value",
+    "--no-hooks": "boolean",
+  })
+  if (positionals.length > 1) throw new CliError("Usage: gwt new [branch] [--base <ref>] [--no-hooks]")
+  const repository = discoverRepository()
+  const configDocument = loadConfig(repository)
+
+  reportWorktree(await createWorktree(repository, configDocument, {
+    branch: positionals[0],
+    base: options.base,
+    noHooks: options["no-hooks"],
+  }))
 }
 
 function linkedWorktreeRows(repository, metadata = loadMetadata(repository)) {
@@ -898,10 +984,38 @@ async function chooseWorktree(repository) {
   })
 }
 
+function looksLikePath(selector) {
+  return isAbsolute(selector) || selector.startsWith(".")
+}
+async function createMissingWorktree(repository, selector, force) {
+  const unmatched = new CliError(`No worktree matches '${selector}'`)
+  if (looksLikePath(selector) || !isBranchName(selector, repository.primaryPath)) throw unmatched
+
+  const resolution = resolveBranchTarget(repository, selector, undefined)
+  if (!force) {
+    const question = resolution.origin === "new"
+      ? `Branch '${selector}' does not exist. Create it and a worktree? [y/N] `
+      : `No worktree for branch '${selector}'. Create one? [y/N] `
+    if (!(await ask(question))) {
+      throw new CliError(`No worktree matches '${selector}'\nCreate one with: gwt new ${selector}`)
+    }
+  }
+
+  return createWorktree(repository, loadConfig(repository), { branch: selector })
+}
 async function commandSwitch(args) {
-  if (args.length > 1) throw new CliError("Usage: gwt switch [primary|id|branch|path]")
+  const { options, positionals } = parseOptions(args, { "--create": "boolean" })
+  if (positionals.length > 1) throw new CliError("Usage: gwt switch [primary|id|branch|path] [--create]")
   const repository = discoverRepository()
-  const worktree = args[0] ? resolveWorktree(repository, args[0]) : await chooseWorktree(repository)
+  const selector = positionals[0]
+  if (!selector && options.create) throw new CliError("--create requires a branch name")
+
+  const worktree = selector ? findWorktree(repository, selector) : await chooseWorktree(repository)
+  if (!worktree) {
+    reportWorktree(await createMissingWorktree(repository, selector, options.create))
+    return
+  }
+
   writeCdDirective(canonical(worktree.path))
   console.log(canonical(worktree.path))
 }
@@ -1343,7 +1457,7 @@ if command -v gwt >/dev/null 2>&1; then
     case "$words[2]" in
       new)
         _arguments \
-          '2:branch name:' \
+          '2:branch name:_gwt_refs' \
           '--base[base Git revision]:revision:_gwt_refs' \
           '--no-hooks[skip project hooks]' \
           '(-h --help)'{-h,--help}'[show help]'
@@ -1357,7 +1471,13 @@ if command -v gwt >/dev/null 2>&1; then
       list|ls)
         _arguments '(-h --help)'{-h,--help}'[show help]'
         ;;
-      switch|info)
+      switch)
+        _arguments \
+          '2:worktree:_gwt_worktrees' \
+          '--create[create a worktree for a branch without one]' \
+          '(-h --help)'{-h,--help}'[show help]'
+        ;;
+      info)
         _arguments \
           '2:worktree:_gwt_worktrees' \
           '(-h --help)'{-h,--help}'[show help]'
@@ -1620,11 +1740,15 @@ Usage:
   gwt new [branch] [--base <ref>] [--no-hooks]
 
 Arguments:
-  branch          New local branch name. Defaults to scratch/<id>.
+  branch          Branch to check out. An existing local branch is reused, a
+                  branch that exists on exactly one remote is checked out with
+                  tracking, and anything else is created. Defaults to
+                  scratch/<id>.
 
 Options:
-  --base <ref>    Start from this Git revision instead of the configured base
-                  or the primary worktree's current commit.
+  --base <ref>    Create the branch from this Git revision instead of the
+                  configured base or the primary worktree's current commit.
+                  Rejected when the branch already exists locally.
   --no-hooks      Copy files and allocate ports, but skip postCreate.
   -h, --help      Show help for this command.
 
@@ -1638,11 +1762,14 @@ Behavior:
   repository hash is added to the directory name only when needed to avoid a
   name collision.
 
+  A branch already checked out in another worktree is refused; switch to that
+  worktree instead.
+
 Examples:
   gwt new feature/auth
   gwt new
   gwt new hotfix/login --base origin/main
-  gwt new experiment --no-hooks`,
+  gwt new feature/from-remote`,
     setup: `Prepare an existing linked worktree using the active gwt configuration.
 
 Usage:
@@ -1681,12 +1808,14 @@ Examples:
     switch: `Switch the current shell to another worktree.
 
 Usage:
-  gwt switch [primary|id|branch|path]
+  gwt switch [primary|id|branch|path] [--create]
 
 Arguments:
   selector        Worktree to switch to. Opens the picker when omitted.
 
 Options:
+  --create        Create the worktree without asking when the selector names a
+                  branch that has none.
   -h, --help      Show help for this command.
 
 Behavior:
@@ -1695,11 +1824,17 @@ Behavior:
   j/k, Ctrl-n/Ctrl-p, and '/' filtering. Shell integration must be installed for
   gwt to change the parent shell's directory; otherwise the path is only printed.
 
+  When nothing matches and the selector is a valid branch name, gwt offers to
+  create the worktree, reusing an existing branch or tracking a remote one just
+  like 'gwt new'. Selectors that look like paths are never treated as branch
+  names. Non-interactive use requires --create.
+
 Examples:
   gwt switch
   gwt switch primary
   gwt switch feature/auth
-  gwt switch a1b2c3d4`,
+  gwt switch a1b2c3d4
+  gwt switch feature/review --create`,
     info: `Show a worktree's identity, Git state, setup status, and assigned ports.
 
 Usage:

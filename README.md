@@ -220,7 +220,7 @@ gwt new [branch] [--base <ref>] [--no-hooks]
 gwt setup [id|branch|path] [--no-hooks]
 gwt list
 gwt ls
-gwt switch [primary|id|branch|path]
+gwt switch [primary|id|branch|path] [--create]
 gwt info [primary|id|branch|path]
 gwt remove [id|branch|path] [--keep-branch|--discard] [--yes] [--no-hooks]
 gwt trust [--revoke]
@@ -238,8 +238,18 @@ behavior, options, and practical examples. Nested commands such as
 assigned ports, and setup status are stored under the repository's common Git
 directory at `.git/gwt/worktrees/`.
 
+`gwt new <branch>` reuses an existing local branch, creates a local branch
+tracking the remote when the name exists on exactly one remote, and otherwise
+creates a new branch from the configured base. `--base` always means "new
+branch", so it is rejected for a branch that already exists locally. A branch
+already checked out in another worktree is reported with its path.
+
 Setup failures retain the worktree and record the failure. Retry with
 `gwt setup <id>` or remove it explicitly.
+
+When `gwt switch` is given a branch that has no worktree, it offers to create
+one, reusing an existing branch or tracking a remote one just like `gwt new`.
+`--create` skips the question, which is required when running non-interactively.
 
 Run `gwt switch` without a target to open the interactive picker. Use the
 arrow keys, `j`/`k`, or Ctrl-n/Ctrl-p to move; press `/` to filter by branch,

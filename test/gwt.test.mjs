@@ -85,6 +85,10 @@ function metadataFiles(repository) {
   return readdirSync(directory).map((name) => join(directory, name))
 }
 
+function readMetadata(repository) {
+  return metadataFiles(repository).map((path) => JSON.parse(readFileSync(path, "utf8")))
+}
+
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true })
 })
@@ -613,6 +617,108 @@ describe("worktree lifecycle", () => {
     assert.match(gwt(fixture, []).stdout, /list\s+List registered worktrees \(alias: ls\)/)
   })
 
+  test("adopts an existing local branch instead of failing", () => {
+    const fixture = createRepository()
+    git(fixture.repository, "branch", "feature/adopt")
+
+    const created = gwt(fixture, ["new", "feature/adopt"])
+    assert.equal(created.status, 0, created.stderr)
+    assert.match(created.stdout, /Branch: feature\/adopt \(existing\)/)
+    const [metadata] = readMetadata(fixture.repository)
+    assert.equal(git(metadata.path, "branch", "--show-current"), "feature/adopt")
+
+    const again = gwt(fixture, ["new", "feature/adopt"])
+    assert.equal(again.status, 1)
+    assert.match(again.stderr, /already checked out at/)
+    assert.match(again.stderr, /gwt switch feature\/adopt/)
+  })
+
+  test("rejects --base for an existing branch but not a configured base", () => {
+    const fixture = createRepository()
+    git(fixture.repository, "branch", "feature/based")
+
+    const rejected = gwt(fixture, ["new", "feature/based", "--base", "HEAD"])
+    assert.equal(rejected.status, 1)
+    assert.match(rejected.stderr, /already exists, so --base would be ignored/)
+
+    writeUserConfig(fixture, { base: "HEAD" })
+    const created = gwt(fixture, ["new", "feature/based"])
+    assert.equal(created.status, 0, created.stderr)
+    assert.match(created.stdout, /Branch: feature\/based \(existing\)/)
+  })
+
+  test("does not confuse a branch with a longer branch that shares its prefix", () => {
+    const fixture = createRepository()
+    git(fixture.repository, "branch", "feature/auth")
+
+    const created = gwt(fixture, ["new", "unrelated"])
+    assert.equal(created.status, 0, created.stderr)
+    assert.match(created.stdout, /Branch: unrelated$/m)
+    assert.doesNotMatch(created.stdout, /existing|tracking/)
+  })
+
+  test("tracks a branch that exists on exactly one remote", () => {
+    const fixture = createRepository()
+    const upstream = join(fixture.root, "upstream.git")
+    git(fixture.repository, "clone", "--bare", "--quiet", fixture.repository, upstream)
+    git(fixture.repository, "remote", "add", "origin", upstream)
+    git(fixture.repository, "push", "--quiet", "origin", "HEAD:refs/heads/feature/remote-only")
+    git(fixture.repository, "fetch", "--quiet", "origin")
+
+    const created = gwt(fixture, ["new", "feature/remote-only"])
+    assert.equal(created.status, 0, created.stderr)
+    assert.match(created.stdout, /Branch: feature\/remote-only \(new, tracking origin\/feature\/remote-only\)/)
+    const [metadata] = readMetadata(fixture.repository)
+    assert.equal(git(metadata.path, "rev-parse", "--abbrev-ref", "@{upstream}"), "origin/feature/remote-only")
+  })
+
+  test("reports a branch that exists on several remotes", () => {
+    const fixture = createRepository()
+    const upstream = join(fixture.root, "upstream.git")
+    git(fixture.repository, "clone", "--bare", "--quiet", fixture.repository, upstream)
+    git(fixture.repository, "remote", "add", "origin", upstream)
+    git(fixture.repository, "remote", "add", "mirror", upstream)
+    git(fixture.repository, "push", "--quiet", "origin", "HEAD:refs/heads/feature/shared")
+    git(fixture.repository, "fetch", "--quiet", "--all")
+
+    const rejected = gwt(fixture, ["new", "feature/shared"])
+    assert.equal(rejected.status, 1)
+    assert.match(rejected.stderr, /exists on several remotes: mirror, origin/)
+    assert.match(rejected.stderr, /--base mirror\/feature\/shared/)
+  })
+
+  test("creates a worktree for a branch that has none from switch", () => {
+    const fixture = createRepository()
+    git(fixture.repository, "branch", "feature/no-worktree")
+
+    const refused = gwt(fixture, ["switch", "feature/no-worktree"])
+    assert.equal(refused.status, 1)
+    assert.match(refused.stderr, /No worktree matches 'feature\/no-worktree'/)
+    assert.match(refused.stderr, /Create one with: gwt new feature\/no-worktree/)
+
+    const cdFile = join(fixture.root, "switch-cd")
+    const created = run(process.execPath, [cli, "switch", "feature/no-worktree", "--create"], {
+      cwd: fixture.repository,
+      env: { ...fixture.env, GWT_CD_FILE: cdFile },
+    })
+    assert.equal(created.status, 0, created.stderr)
+    assert.match(created.stdout, /Branch: feature\/no-worktree \(existing\)/)
+    const [metadata] = readMetadata(fixture.repository)
+    assert.equal(readFileSync(cdFile, "utf8"), metadata.path)
+  })
+
+  test("never invents a branch from a path-like or invalid selector", () => {
+    const fixture = createRepository()
+    mkdirSync(join(fixture.root, "not a worktree"), { recursive: true })
+
+    for (const selector of ["../not a worktree", "./missing", "bad name", "@{-1}", "HEAD"]) {
+      const refused = gwt(fixture, ["switch", selector, "--create"])
+      assert.equal(refused.status, 1, `expected '${selector}' to be refused`)
+      assert.match(refused.stderr, /No worktree matches/)
+    }
+    assert.equal(existsSync(join(fixture.repository, ".git", "gwt", "worktrees")), false)
+  })
+
   test("adopts a native linked worktree during setup", () => {
     const fixture = createRepository()
     writeConfig(fixture.repository, { ports: ["APP_PORT"] })
@@ -642,6 +748,7 @@ describe("shell integration", () => {
     assert.match(result.stdout, /__complete worktrees/)
     assert.match(result.stdout, /'ls:List worktrees'/)
     assert.match(result.stdout, /list\|ls\)/)
+    assert.match(result.stdout, /--create\[create a worktree for a branch without one\]/)
   })
 
   test("loads worktree environment silently and restores the previous shell", () => {

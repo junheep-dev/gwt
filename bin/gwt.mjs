@@ -1054,8 +1054,10 @@ async function commandRemove(args) {
 
   if (!options["no-hooks"]) {
     const configDocument = loadConfig(repository)
-    await ensureTrusted(repository, configDocument, targetPath)
-    runHook("preRemove", repository, configDocument, worktree, metadata)
+    if (configDocument.value.preRemove) {
+      await ensureTrusted(repository, configDocument, targetPath)
+      runHook("preRemove", repository, configDocument, worktree, metadata)
+    }
   }
 
   const removeArgs = ["worktree", "remove"]
@@ -1730,7 +1732,9 @@ Behavior:
   when 'git branch -d' considers deletion safe. If safe deletion fails, an
   interactive terminal asks whether to force-delete the branch; non-interactive
   use keeps it. The primary worktree cannot be removed. Removing the current
-  worktree returns an integrated shell to the primary worktree.
+  worktree returns an integrated shell to the primary worktree. Configuration
+  approval is requested only when preRemove is configured, because removal
+  applies nothing else from the configuration.
 
 Examples:
   gwt remove

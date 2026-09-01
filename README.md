@@ -209,7 +209,9 @@ approval because they execute code:
 gwt trust
 ```
 
-Approval is invalidated when `.gwt.json` or either hook changes.
+Approval is invalidated when `.gwt.json` or either hook changes. `gwt remove`
+asks for approval only when `preRemove` is configured, because removal applies
+nothing else from the configuration.
 
 ## Commands
 

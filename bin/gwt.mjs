@@ -1322,6 +1322,82 @@ async function commandRemove(args) {
   if (wasCurrent) writeCdDirective(repository.primaryPath)
 }
 
+function branchContainedElsewhere(repository, branch) {
+  const result = git([
+    "for-each-ref",
+    "--format=%(refname:short)",
+    "--contains",
+    `refs/heads/${branch}`,
+    "refs/heads",
+    "refs/remotes",
+  ], repository.primaryPath, { allowFailure: true })
+  if (result.status !== 0) return []
+  return result.stdout.split("\n").filter(Boolean).filter((reference) => reference !== branch)
+}
+
+function pruneCandidates(repository) {
+  const metadata = loadMetadata(repository)
+  const prunable = repository.worktrees.filter((worktree) => worktree.prunable)
+  const live = new Set(repository.worktrees
+    .filter((worktree) => !worktree.prunable)
+    .map((worktree) => resolve(worktree.path)))
+
+  const stale = []
+  const running = []
+  for (const item of metadata) {
+    if (live.has(resolve(item.path))) continue
+    if (jobStatus(item) === "running") running.push(item)
+    else stale.push(item)
+  }
+
+  const branches = stale
+    .filter((item) => item.scratchBranch && localBranch(repository, item.scratchBranch))
+    .map((item) => ({ branch: item.scratchBranch, containedIn: branchContainedElsewhere(repository, item.scratchBranch) }))
+
+  const retained = new Set(metadata.filter((item) => !stale.includes(item)).map((item) => item.id))
+  const directory = join(repository.commonDir, "gwt", "logs")
+  const logs = existsSync(directory)
+    ? readdirSync(directory)
+      .filter((name) => name.endsWith(".log") && !retained.has(basename(name, ".log")))
+      .map((name) => join(directory, name))
+    : []
+
+  return { prunable, stale, running, branches, logs }
+}
+
+async function commandPrune(args) {
+  const { options, positionals } = parseOptions(args, { "--dry-run": "boolean", "--yes": "boolean" })
+  if (positionals.length > 0) throw new CliError("Usage: gwt prune [--dry-run] [--yes]")
+  const repository = discoverRepository()
+  const { prunable, stale, running, branches, logs } = pruneCandidates(repository)
+  const removable = branches.filter((item) => item.containedIn.length > 0)
+  const retained = branches.filter((item) => item.containedIn.length === 0)
+  const total = prunable.length + stale.length + removable.length + logs.length
+
+  for (const item of retained) {
+    console.log(`Keeping scratch branch ${item.branch}: no other branch contains its commits`)
+  }
+  for (const item of running) console.log(`Keeping metadata ${item.id}: setup is still running`)
+  if (total === 0) {
+    console.log("Nothing to prune")
+    return
+  }
+
+  for (const worktree of prunable) console.log(`Worktree registration: ${worktree.path}`)
+  for (const item of stale) console.log(`Metadata: ${item.id}`)
+  for (const item of removable) console.log(`Scratch branch: ${item.branch} (contained in ${item.containedIn[0]})`)
+  for (const path of logs) console.log(`Setup log: ${basename(path)}`)
+
+  if (options["dry-run"]) return
+  if (!options.yes && !(await ask("Prune? [y/N] "))) throw new CliError("Prune cancelled")
+
+  if (prunable.length > 0) git(["worktree", "prune"], repository.primaryPath)
+  for (const item of stale) if (existsSync(item.metadataPath)) unlinkSync(item.metadataPath)
+  for (const item of removable) git(["branch", "-D", "--", item.branch], repository.primaryPath)
+  for (const path of logs) if (existsSync(path)) unlinkSync(path)
+  console.log(`Pruned ${total} item${total === 1 ? "" : "s"}`)
+}
+
 function commandTrust(args) {
   const { options, positionals } = parseOptions(args, { "--revoke": "boolean" })
   if (positionals.length > 0) throw new CliError("Usage: gwt trust [--revoke]")
@@ -1559,6 +1635,7 @@ if command -v gwt >/dev/null 2>&1; then
       'switch:Switch to a worktree'
       'info:Show worktree details'
       'remove:Remove a worktree'
+      'prune:Clean up records of removed worktrees'
       'trust:Approve project hooks'
       'config:Manage user and project configuration'
       'shell:Install shell integration'
@@ -1607,6 +1684,12 @@ if command -v gwt >/dev/null 2>&1; then
           '--discard[discard uncommitted changes]' \
           '--yes[skip removal confirmation]' \
           '--no-hooks[skip project hooks]' \
+          '(-h --help)'{-h,--help}'[show help]'
+        ;;
+      prune)
+        _arguments \
+          '--dry-run[show what would be pruned]' \
+          '--yes[skip the confirmation]' \
           '(-h --help)'{-h,--help}'[show help]'
         ;;
       trust)
@@ -1867,6 +1950,7 @@ Commands:
   switch    Switch the current shell to a worktree
   info      Show worktree details and assigned ports
   remove    Safely remove a worktree and optionally its branch
+  prune     Clean up leftovers from worktrees that are already gone
   trust     Approve or revoke repository project configuration
   config    Create or inspect configuration
   shell     Install shell integration
@@ -1880,6 +1964,7 @@ Examples:
   gwt new feature/auth
   gwt switch
   gwt remove
+  gwt prune
   gwt config create
   gwt shell install zsh
   gwt skill install claude
@@ -2048,6 +2133,32 @@ Examples:
   gwt remove
   gwt remove feature/auth --keep-branch
   gwt remove a1b2c3d4 --discard --yes`,
+    prune: `Clean up records left behind by worktrees that are already gone.
+
+Usage:
+  gwt prune [--dry-run] [--yes]
+
+Options:
+  --dry-run       Print what would be pruned without changing anything.
+  --yes           Prune without asking for confirmation.
+  -h, --help      Show help for this command.
+
+Behavior:
+  Prune reports what it would remove and asks before touching anything, so
+  running it with no options is safe. It unregisters worktrees whose directory
+  is gone, deletes metadata and setup logs with no worktree left, and deletes
+  the scratch branch such a worktree recorded.
+
+  A scratch branch is deleted only when another local or remote branch already
+  contains its commits, so nothing is lost. One holding commits no other branch
+  contains is reported and kept. Only branches gwt recorded at creation are
+  considered; other branches are never touched. Metadata for a setup that is
+  still running is left alone.
+
+Examples:
+  gwt prune
+  gwt prune --dry-run
+  gwt prune --yes`,
     trust: `Approve or revoke active configuration declared by the repository's .gwt.json.
 
 Usage:
@@ -2217,6 +2328,7 @@ async function main() {
   if (command === "switch") return commandSwitch(args)
   if (command === "info") return commandInfo(args)
   if (command === "remove") return commandRemove(args)
+  if (command === "prune") return commandPrune(args)
   if (command === "trust") return commandTrust(args)
   if (command === "config") return commandConfig(args)
   if (command === "shell") return commandShell(args)

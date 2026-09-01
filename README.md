@@ -223,6 +223,7 @@ gwt ls
 gwt switch [primary|id|branch|path] [--create]
 gwt info [primary|id|branch|path]
 gwt remove [id|branch|path] [--keep-branch|--discard] [--yes] [--no-hooks]
+gwt prune [--dry-run] [--yes]
 gwt trust [--revoke]
 gwt config create [--project]
 gwt config show
@@ -281,3 +282,11 @@ commit, so nothing is lost. This is the usual `git checkout -b` case, which
 `git branch -d` alone would refuse because the commits are not on the primary
 branch. A scratch branch holding commits that were left behind is kept and
 reported instead. `--keep-branch` keeps it either way.
+
+`gwt prune` cleans up after worktrees that are already gone: registrations
+whose directory was deleted by hand, metadata and setup logs with no worktree
+left, and the `scratch/<id>` branch such a worktree recorded. It reports what
+it would do and asks first, so running it bare is safe. A scratch branch is
+deleted only when another local or remote branch already contains its commits;
+one holding commits nothing else contains is reported and kept. Branches gwt
+did not create are never touched.

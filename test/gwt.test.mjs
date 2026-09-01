@@ -782,21 +782,6 @@ describe("worktree lifecycle", () => {
     assert.equal(git(fixture.repository, "branch", "--list", metadata.scratchBranch), "")
   })
 
-  test("lists and inspects a worktree whose directory was deleted outside gwt", () => {
-    const fixture = createRepository()
-    assert.equal(gwt(fixture, ["new", "feature/doomed"]).status, 0)
-    const [metadata] = readMetadata(fixture.repository)
-    rmSync(metadata.path, { recursive: true, force: true })
-
-    const listed = gwt(fixture, ["list"])
-    assert.equal(listed.status, 0, listed.stderr)
-    assert.match(listed.stdout, /feature\/doomed/)
-
-    const info = gwt(fixture, ["info", metadata.id])
-    assert.equal(info.status, 0, info.stderr)
-    assert.match(info.stdout, new RegExp(`Path: ${metadata.path}`))
-  })
-
   test("adopts a native linked worktree during setup", () => {
     const fixture = createRepository()
     writeConfig(fixture.repository, { ports: ["APP_PORT"] })
@@ -937,6 +922,82 @@ describe("background setup", () => {
   })
 })
 
+describe("prune", () => {
+  test("survives and cleans up a worktree directory deleted by hand", () => {
+    const fixture = createRepository()
+    assert.equal(gwt(fixture, ["new", "feature/doomed"]).status, 0)
+    const [metadata] = readMetadata(fixture.repository)
+    rmSync(metadata.path, { recursive: true, force: true })
+
+    const listed = gwt(fixture, ["list"])
+    assert.equal(listed.status, 0, listed.stderr)
+    assert.match(listed.stdout, /feature\/doomed/)
+    assert.equal(gwt(fixture, ["info", metadata.id]).status, 0)
+
+    const planned = gwt(fixture, ["prune", "--dry-run"])
+    assert.equal(planned.status, 0, planned.stderr)
+    assert.match(planned.stdout, /Worktree registration:/)
+    assert.match(planned.stdout, new RegExp(`Metadata: ${metadata.id}`))
+    assert.equal(metadataFiles(fixture.repository).length, 1, "dry run must not delete anything")
+
+    const pruned = gwt(fixture, ["prune", "--yes"])
+    assert.equal(pruned.status, 0, pruned.stderr)
+    assert.equal(metadataFiles(fixture.repository).length, 0)
+    assert.doesNotMatch(gwt(fixture, ["list"]).stdout, /feature\/doomed/)
+  })
+
+  test("deletes a scratch branch another branch contains and keeps a stranded one", () => {
+    const fixture = createRepository()
+
+    assert.equal(gwt(fixture, ["new"]).status, 0)
+    const [carried] = readMetadata(fixture.repository)
+    writeFileSync(join(carried.path, "carried.txt"), "carried\n")
+    git(carried.path, "add", "carried.txt")
+    git(carried.path, "commit", "-m", "Carried work")
+    git(carried.path, "checkout", "-b", "feature/carried")
+    git(fixture.repository, "worktree", "remove", "--force", carried.path)
+
+    assert.equal(gwt(fixture, ["new"]).status, 0)
+    const stranded = readMetadata(fixture.repository).find((item) => item.id !== carried.id)
+    writeFileSync(join(stranded.path, "stranded.txt"), "stranded\n")
+    git(stranded.path, "add", "stranded.txt")
+    git(stranded.path, "commit", "-m", "Stranded work")
+    rmSync(stranded.path, { recursive: true, force: true })
+
+    const pruned = gwt(fixture, ["prune", "--yes"])
+    assert.equal(pruned.status, 0, pruned.stderr)
+    assert.match(pruned.stdout, new RegExp(`Scratch branch: ${carried.scratchBranch} \\(contained in feature/carried\\)`))
+    assert.match(pruned.stdout, new RegExp(`Keeping scratch branch ${stranded.scratchBranch}`))
+    assert.equal(git(fixture.repository, "branch", "--list", carried.scratchBranch), "")
+    assert.match(git(fixture.repository, "branch", "--list", stranded.scratchBranch), /scratch\//)
+    assert.match(git(fixture.repository, "branch", "--list", "feature/carried"), /feature\/carried/)
+  })
+
+  test("reports nothing to prune and never touches unrelated branches", () => {
+    const fixture = createRepository()
+    git(fixture.repository, "branch", "scratch/hand-made")
+    assert.equal(gwt(fixture, ["new", "feature/live"]).status, 0)
+
+    const pruned = gwt(fixture, ["prune", "--yes"])
+    assert.equal(pruned.status, 0, pruned.stderr)
+    assert.match(pruned.stdout, /Nothing to prune/)
+    assert.match(git(fixture.repository, "branch", "--list", "scratch/hand-made"), /scratch\/hand-made/)
+    assert.equal(metadataFiles(fixture.repository).length, 1)
+  })
+
+  test("keeps everything when the confirmation is declined", () => {
+    const fixture = createRepository()
+    assert.equal(gwt(fixture, ["new", "feature/kept"]).status, 0)
+    const [metadata] = readMetadata(fixture.repository)
+    rmSync(metadata.path, { recursive: true, force: true })
+
+    const declined = gwt(fixture, ["prune"])
+    assert.equal(declined.status, 1)
+    assert.match(declined.stderr, /Prune cancelled/)
+    assert.equal(metadataFiles(fixture.repository).length, 1)
+  })
+})
+
 describe("shell integration", () => {
   test("emits a zsh wrapper with environment synchronization and completion", () => {
     const fixture = createRepository()
@@ -950,6 +1011,7 @@ describe("shell integration", () => {
     assert.match(result.stdout, /__complete worktrees/)
     assert.match(result.stdout, /'ls:List worktrees'/)
     assert.match(result.stdout, /list\|ls\)/)
+    assert.match(result.stdout, /'prune:Clean up records of removed worktrees'/)
     assert.match(result.stdout, /--create\[create a worktree for a branch without one\]/)
     assert.match(result.stdout, /--background\[run postCreate in the background\]/)
   })

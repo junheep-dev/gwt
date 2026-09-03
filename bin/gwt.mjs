@@ -1785,22 +1785,37 @@ stay accurate across versions.
   are not applied until the repository is approved with \`gwt trust\`. Approval
   is invalidated whenever the config or a hook changes, so a repository that
   worked before can start asking again.
+- \`gwt new <branch>\` reuses a branch that already exists locally, or creates one
+  tracking the remote when the name exists on exactly one remote, so there is no
+  need to check first. It refuses only a branch already checked out in another
+  worktree, which means switching to that worktree instead.
 - A failed setup keeps the worktree and records the failure. Retry it with
   \`gwt setup <id>\` rather than removing and recreating the worktree.
 - Ports are assigned per worktree. With shell integration installed, assigned
-  ports and configured environment variables load automatically. Read ports
-  from \`gwt info\` instead of assuming a project default; two worktrees of the
-  same project never share a port.
+  ports and configured environment variables load automatically. Read both from
+  \`gwt info\` instead of assuming a project default; two worktrees of the same
+  project never share a port.
+- \`--background\` returns before \`postCreate\` finishes, so the worktree is not
+  ready yet. Do not use it when the next step needs installed dependencies;
+  without it, setup is complete when the command returns.
 - \`gwt switch\` changes the shell's directory only when the shell integration is
   installed. Otherwise it just prints the path.
 - \`gwt switch\` with no target opens an interactive picker, so always pass an
   explicit target when running non-interactively.
+- \`gwt switch <branch>\` offers to create a worktree when that branch has none,
+  and needs \`--create\` to do it without asking. Only pass \`--create\` for a
+  branch name the user gave you: a typo silently becomes a new branch.
 
-## Removal is destructive
+## Removal and pruning are destructive
 
 \`gwt remove\` deletes the worktree and, by default, its branch. Confirm with the
 user before running it, and never pass \`--discard --yes\` on your own: together
 they discard uncommitted changes and force-delete an unmerged branch.
+
+\`gwt prune\` deletes records of worktrees that are already gone, including the
+scratch branch such a worktree recorded. Bare, it reports what it found and
+asks first, which is the only form to run unprompted; \`--yes\` skips that
+question, so leave it to the user.
 `
 }
 

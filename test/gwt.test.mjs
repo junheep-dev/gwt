@@ -1172,6 +1172,9 @@ describe("shell integration", () => {
     const contents = readFileSync(userSkill, "utf8")
     assert.match(contents, /^name: gwt$/m)
     assert.match(contents, /gwt new/)
+    assert.match(contents, /`--background` returns before `postCreate` finishes/)
+    assert.match(contents, /`gwt prune` deletes records of worktrees that are already gone/)
+    assert.match(contents, /needs `--create` to do it without asking/)
 
     const repeated = install("--yes")
     assert.equal(repeated.status, 0, repeated.stderr)

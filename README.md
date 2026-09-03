@@ -253,20 +253,11 @@ and ask for configuration approval before returning, then run `postCreate` in a
 detached process, so an integrated shell enters the worktree immediately.
 Output goes to `.git/gwt/logs/<id>.log`. `gwt list` shows the worktree as
 `running` until the hook finishes. A job whose process disappears is reported
-as `interrupted` and can be retried with `gwt setup <id>`. `--background` cannot be combined with `--no-hooks`, and a
-worktree cannot be set up or removed while its background setup is running.
+as `interrupted` and can be retried with `gwt setup <id>`. `--background`
+cannot be combined with `--no-hooks`, and a worktree cannot be set up or
+removed while its background setup is running.
 
 `gwt ls` is an alias for `gwt list`.
-
-`gwt info` lists a worktree's assigned ports and configured environment
-variables exactly as the shell integration loads them, so the two cannot drift.
-Values from a repository `.gwt.json` are withheld until `gwt trust` approves
-the configuration, and a variable that cannot be resolved is reported rather
-than failing the command.
-
-When `gwt switch` is given a branch that has no worktree, it offers to create
-one, reusing an existing branch or tracking a remote one just like `gwt new`.
-`--create` skips the question, which is required when running non-interactively.
 
 Run `gwt switch` without a target to open the interactive picker. Use the
 arrow keys, `j`/`k`, or Ctrl-n/Ctrl-p to move; press `/` to filter by branch,
@@ -274,6 +265,16 @@ ID, or path. Enter switches to the selected worktree. Escape leaves filter
 mode or cancels the picker. `primary` is a reserved ID for the repository's
 primary worktree, so `gwt switch primary` returns to it from any linked
 worktree.
+
+When `gwt switch` is given a branch that has no worktree, it offers to create
+one, reusing an existing branch or tracking a remote one just like `gwt new`.
+`--create` skips the question, which is required when running non-interactively.
+
+`gwt info` lists a worktree's assigned ports and configured environment
+variables exactly as the shell integration loads them, so the two cannot drift.
+Values from a repository `.gwt.json` are withheld until `gwt trust` approves
+the configuration, and a variable that cannot be resolved is reported rather
+than failing the command.
 
 `gwt remove` refuses dirty worktrees and first tries to delete the branch with
 `git branch -d`. If Git rejects safe deletion, an interactive terminal asks

@@ -782,6 +782,53 @@ describe("worktree lifecycle", () => {
     assert.equal(git(fixture.repository, "branch", "--list", metadata.scratchBranch), "")
   })
 
+  test("shows the environment a worktree loads, and why when it cannot", () => {
+    const fixture = createRepository()
+    writeConfig(fixture.repository, {
+      ports: ["WEB_PORT", "SERVER_PORT"],
+      env: {
+        NEXT_PUBLIC_API_ENDPOINT: "http://127.0.0.1:${SERVER_PORT}",
+        DATABASE_URL: "postgres://localhost/app_dev",
+      },
+    })
+    assert.equal(gwt(fixture, ["trust"]).status, 0)
+    assert.equal(gwt(fixture, ["new", "feature/env"]).status, 0)
+    const [metadata] = readMetadata(fixture.repository)
+
+    const info = gwt(fixture, ["info", metadata.id])
+    assert.equal(info.status, 0, info.stderr)
+    assert.match(info.stdout, new RegExp(`^WEB_PORT: ${metadata.ports.WEB_PORT}$`, "m"))
+    assert.match(info.stdout, new RegExp(`^NEXT_PUBLIC_API_ENDPOINT: http://127\\.0\\.0\\.1:${metadata.ports.SERVER_PORT}$`, "m"))
+    assert.match(info.stdout, /^DATABASE_URL: postgres:\/\/localhost\/app_dev$/m)
+
+    const shell = run(process.execPath, [cli, "__shell_env", "zsh"], { cwd: metadata.path, env: fixture.env })
+    assert.match(shell.stdout, new RegExp(`export NEXT_PUBLIC_API_ENDPOINT='http://127.0.0.1:${metadata.ports.SERVER_PORT}'`))
+
+    assert.equal(gwt(fixture, ["trust", "--revoke"]).status, 0)
+    const untrusted = gwt(fixture, ["info", metadata.id])
+    assert.equal(untrusted.status, 0, untrusted.stderr)
+    assert.match(untrusted.stdout, /^Environment: not applied until 'gwt trust'/m)
+    assert.doesNotMatch(untrusted.stdout, /DATABASE_URL/)
+    assert.match(untrusted.stdout, new RegExp(`^WEB_PORT: ${metadata.ports.WEB_PORT}$`, "m"))
+  })
+
+  test("explains an unresolvable port instead of failing gwt info", () => {
+    const fixture = createRepository()
+    writeConfig(fixture.repository, { ports: ["WEB_PORT"] })
+    assert.equal(gwt(fixture, ["trust"]).status, 0)
+    assert.equal(gwt(fixture, ["new", "feature/ports"]).status, 0)
+    const [metadata] = readMetadata(fixture.repository)
+
+    writeFileSync(join(fixture.repository, ".gwt.json"), `${JSON.stringify({ ports: ["WEB_PORT", "ADMIN_PORT"] }, null, 2)}\n`)
+    git(fixture.repository, "commit", "-am", "Add a port")
+    assert.equal(gwt(fixture, ["trust"]).status, 0)
+
+    const info = gwt(fixture, ["info", metadata.id])
+    assert.equal(info.status, 0, info.stderr)
+    assert.match(info.stdout, /^Environment: This worktree has no assigned ADMIN_PORT/m)
+    assert.match(info.stdout, new RegExp(`^WEB_PORT: ${metadata.ports.WEB_PORT}$`, "m"))
+  })
+
   test("adopts a native linked worktree during setup", () => {
     const fixture = createRepository()
     writeConfig(fixture.repository, { ports: ["APP_PORT"] })

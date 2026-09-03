@@ -1198,6 +1198,17 @@ function commandInfo(args) {
   console.log(`HEAD: ${worktree.head}`)
   console.log(`Setup: ${jobStatus(metadata) ?? "unmanaged"}`)
   for (const [name, port] of Object.entries(metadata?.ports ?? {})) console.log(`${name}: ${port}`)
+  if (metadata) {
+    try {
+      const environment = worktreeEnvironment(repository, worktree)
+      for (const [name, value] of Object.entries(environment.values)) {
+        if (!Object.hasOwn(metadata.ports ?? {}, name)) console.log(`${name}: ${value}`)
+      }
+      if (environment.reason) console.log(`Environment: ${environment.reason}`)
+    } catch (error) {
+      console.log(`Environment: ${error.message}`)
+    }
+  }
   if (metadata?.setupError) console.log(`Setup error: ${metadata.setupError}`)
 }
 
@@ -1490,21 +1501,21 @@ function commandConfig(args) {
   throw new CliError("Usage: gwt config <create [--project]|show>")
 }
 
-function configuredShellEnvironment() {
-  const insideRepository = git(["rev-parse", "--is-inside-work-tree"], process.cwd(), { allowFailure: true })
-  if (insideRepository.status !== 0) return {}
-
-  const repository = discoverRepository()
-  const worktree = currentWorktree(repository)
-  if (!worktree || resolve(worktree.path) === resolve(repository.primaryPath)) return {}
+function worktreeEnvironment(repository, worktree) {
+  if (resolve(worktree.path) === resolve(repository.primaryPath)) return { applied: false, reason: null, values: {} }
 
   const metadata = metadataForWorktree(repository, worktree)
-  if (!metadata) return {}
+  if (!metadata) return { applied: false, reason: null, values: {} }
 
   const configDocument = loadConfig(repository)
+  if (configDocument.value.ports.length === 0 && Object.keys(configDocument.value.env).length === 0) {
+    return { applied: true, reason: null, values: {} }
+  }
   if (configDocument.requiresTrust) {
     const fingerprint = trustFingerprint(repository, configDocument, canonical(worktree.path))
-    if (!isTrusted(repository, fingerprint)) return {}
+    if (!isTrusted(repository, fingerprint)) {
+      return { applied: false, reason: "not applied until 'gwt trust' approves this repository's configuration", values: {} }
+    }
   }
 
   const ports = Object.fromEntries(configDocument.value.ports.map((name) => {
@@ -1513,7 +1524,17 @@ function configuredShellEnvironment() {
     }
     return [name, String(metadata.ports[name])]
   }))
-  return { ...ports, ...resolveConfiguredEnv(configDocument.value, metadata.ports ?? {}) }
+  return { applied: true, reason: null, values: { ...ports, ...resolveConfiguredEnv(configDocument.value, metadata.ports ?? {}) } }
+}
+
+function configuredShellEnvironment() {
+  const insideRepository = git(["rev-parse", "--is-inside-work-tree"], process.cwd(), { allowFailure: true })
+  if (insideRepository.status !== 0) return {}
+
+  const repository = discoverRepository()
+  const worktree = currentWorktree(repository)
+  if (!worktree) return {}
+  return worktreeEnvironment(repository, worktree).values
 }
 
 function readShellEnvironmentState() {
@@ -1948,7 +1969,7 @@ Commands:
   setup     Set up an existing worktree
   list      List registered worktrees (alias: ls)
   switch    Switch the current shell to a worktree
-  info      Show worktree details and assigned ports
+  info      Show worktree details, ports, and environment
   remove    Safely remove a worktree and optionally its branch
   prune     Clean up leftovers from worktrees that are already gone
   trust     Approve or revoke repository project configuration
@@ -2080,7 +2101,7 @@ Examples:
   gwt switch feature/auth
   gwt switch a1b2c3d4
   gwt switch feature/review --create`,
-    info: `Show a worktree's identity, Git state, setup status, and assigned ports.
+    info: `Show a worktree's identity, Git state, setup status, and environment.
 
 Usage:
   gwt info [primary|id|branch|path]
@@ -2091,6 +2112,13 @@ Arguments:
 
 Options:
   -h, --help      Show help for this command.
+
+Behavior:
+  Assigned ports and configured environment variables are listed exactly as an
+  integrated shell loads them, so what is printed is what the worktree gets.
+  Values declared by a repository .gwt.json are withheld until 'gwt trust'
+  approves the configuration, and a variable that cannot be resolved is
+  reported instead of failing the command.
 
 Examples:
   gwt info

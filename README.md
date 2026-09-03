@@ -258,6 +258,12 @@ worktree cannot be set up or removed while its background setup is running.
 
 `gwt ls` is an alias for `gwt list`.
 
+`gwt info` lists a worktree's assigned ports and configured environment
+variables exactly as the shell integration loads them, so the two cannot drift.
+Values from a repository `.gwt.json` are withheld until `gwt trust` approves
+the configuration, and a variable that cannot be resolved is reported rather
+than failing the command.
+
 When `gwt switch` is given a branch that has no worktree, it offers to create
 one, reusing an existing branch or tracking a remote one just like `gwt new`.
 `--create` skips the question, which is required when running non-interactively.

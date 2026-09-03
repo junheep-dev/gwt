@@ -58,14 +58,10 @@ the installed skill is identical:
 `--project` writes into the primary worktree so the skill can be committed for
 the team.
 
-The skill covers what `gwt --help` does not: that gwt is preferred over native
-`git worktree`, that project hooks need `gwt trust`, that a failed setup is
-retried rather than recreated, that ports come from `gwt info`, and that
-removal is destructive. It points at `gwt <command> --help` for command
-details instead of repeating them, so it does not go stale as gwt changes.
-Reinstall after upgrading to pick up a revised skill; an unchanged file is
-reported as already installed, and a modified one is replaced only after
-confirmation.
+The skill covers what the help does not: when to prefer gwt over native
+`git worktree`, which commands are destructive, and the traps worth knowing. It
+points at `gwt <command> --help` for command details rather than repeating
+them. Reinstall after upgrading gwt to pick up a revised skill.
 
 ## Configuration
 
@@ -231,69 +227,25 @@ gwt shell install zsh [--dry-run] [--yes]
 gwt skill install <claude|codex> [--project] [--dry-run] [--yes]
 ```
 
-Run `gwt --help` for the command overview, or `gwt <command> --help` for
-behavior, options, and practical examples. Nested commands such as
-`gwt config create --help` have their own help as well.
+Run `gwt --help` for the overview, or `gwt <command> --help` for arguments,
+options, behavior, and examples. Nested commands such as `gwt config create
+--help` have their own help.
 
-`gwt new` creates `scratch/<id>` when no branch is provided. The immutable ID,
-assigned ports, and setup status are stored under the repository's common Git
-directory at `.git/gwt/worktrees/`.
+What the listing does not show:
 
-`gwt new <branch>` reuses an existing local branch, creates a local branch
-tracking the remote when the name exists on exactly one remote, and otherwise
-creates a new branch from the configured base. `--base` always means "new
-branch", so it is rejected for a branch that already exists locally. A branch
-already checked out in another worktree is reported with its path.
-
-Setup failures retain the worktree and record the failure. Retry with
-`gwt setup <id>` or remove it explicitly.
-
-`gwt new --background` and `gwt setup --background` copy files, assign ports,
-and ask for configuration approval before returning, then run `postCreate` in a
-detached process, so an integrated shell enters the worktree immediately.
-Output goes to `.git/gwt/logs/<id>.log`. `gwt list` shows the worktree as
-`running` until the hook finishes. A job whose process disappears is reported
-as `interrupted` and can be retried with `gwt setup <id>`. `--background`
-cannot be combined with `--no-hooks`, and a worktree cannot be set up or
-removed while its background setup is running.
-
-`gwt ls` is an alias for `gwt list`.
-
-Run `gwt switch` without a target to open the interactive picker. Use the
-arrow keys, `j`/`k`, or Ctrl-n/Ctrl-p to move; press `/` to filter by branch,
-ID, or path. Enter switches to the selected worktree. Escape leaves filter
-mode or cancels the picker. `primary` is a reserved ID for the repository's
-primary worktree, so `gwt switch primary` returns to it from any linked
-worktree.
-
-When `gwt switch` is given a branch that has no worktree, it offers to create
-one, reusing an existing branch or tracking a remote one just like `gwt new`.
-`--create` skips the question, which is required when running non-interactively.
-
-`gwt info` lists a worktree's assigned ports and configured environment
-variables exactly as the shell integration loads them, so the two cannot drift.
-Values from a repository `.gwt.json` are withheld until `gwt trust` approves
-the configuration, and a variable that cannot be resolved is reported rather
-than failing the command.
-
-`gwt remove` refuses dirty worktrees and first tries to delete the branch with
-`git branch -d`. If Git rejects safe deletion, an interactive terminal asks
-whether to force-delete the branch; non-interactive use keeps it and prints a
-command for deleting it later. `--discard --yes` explicitly allows dirty
-worktree removal and forced branch deletion.
-
-A worktree created without a branch argument records its `scratch/<id>` branch.
-If the worktree later moved to another branch, removal deletes that leftover
-scratch branch when the branch it moved to already contains every scratch
-commit, so nothing is lost. This is the usual `git checkout -b` case, which
-`git branch -d` alone would refuse because the commits are not on the primary
-branch. A scratch branch holding commits that were left behind is kept and
-reported instead. `--keep-branch` keeps it either way.
-
-`gwt prune` cleans up after worktrees that are already gone: registrations
-whose directory was deleted by hand, metadata and setup logs with no worktree
-left, and the `scratch/<id>` branch such a worktree recorded. It reports what
-it would do and asks first, so running it bare is safe. A scratch branch is
-deleted only when another local or remote branch already contains its commits;
-one holding commits nothing else contains is reported and kept. Branches gwt
-did not create are never touched.
+- **Branches.** `gwt new` without an argument creates `scratch/<id>`. With one,
+  it reuses an existing local branch, or creates a branch tracking the remote
+  when the name exists on exactly one remote; `--base` always means "new
+  branch". `gwt switch <branch>` offers to create a worktree for a branch that
+  has none, and `--create` skips the question when running non-interactively.
+- **Background setup.** `--background` detaches `postCreate` and returns once
+  files are copied and ports assigned, logging to `.git/gwt/logs/<id>.log`.
+  `gwt list` reports the worktree as `running`, or `interrupted` if the process
+  disappears.
+- **Cleanup.** `gwt remove` also deletes the `scratch/<id>` branch a worktree
+  moved off, but only when the branch it moved to already contains those
+  commits. `gwt prune` clears records left by worktrees removed outside gwt,
+  including their scratch branches; it reports what it found and asks first.
+- **State.** IDs, assigned ports, and setup status live in
+  `.git/gwt/worktrees/`. `gwt info` prints a worktree's ports and environment
+  exactly as the shell integration loads them.

@@ -200,7 +200,7 @@ function resolveConfiguredEnv(config, ports) {
     name,
     template.replace(/\$\{([^}]*)\}/g, (_, reference) => {
       if (!Object.hasOwn(ports, reference)) {
-        throw new CliError(`Cannot resolve env.${name}: this worktree has no assigned ${reference}`)
+        throw new CliError(`Cannot resolve env.${name}: this worktree has no assigned ${reference}; run 'gwt setup' to assign it`)
       }
       return String(ports[reference])
     }),
@@ -462,20 +462,30 @@ function portIsAvailable(port) {
   })
 }
 
-async function allocatePorts(repository, id, names) {
-  if (names.length === 0) return {}
+async function allocatePorts(repository, id, names, existing = {}) {
+  const missing = names.filter((name) => !Object.hasOwn(existing, name))
+  if (missing.length === 0) return { ...existing }
   const reserved = new Set(loadMetadata(repository).flatMap((metadata) => Object.values(metadata.ports ?? {})))
-  const availableStarts = PORT_MAX - PORT_MIN - names.length + 2
+  const assign = (start) => ({ ...existing, ...Object.fromEntries(missing.map((name, index) => [name, start + index])) })
+  const usable = async (start) => {
+    const candidates = missing.map((_, index) => start + index)
+    if (candidates.some((port) => reserved.has(port))) return false
+    return (await Promise.all(candidates.map(portIsAvailable))).every(Boolean)
+  }
+
+  const assigned = Object.values(existing)
+  if (assigned.length > 0) {
+    const adjacent = Math.max(...assigned) + 1
+    if (adjacent + missing.length - 1 <= PORT_MAX && await usable(adjacent)) return assign(adjacent)
+  }
+
+  const availableStarts = PORT_MAX - PORT_MIN - missing.length + 2
   const digest = createHash("sha256").update(`${repository.primaryPath}\0${id}`).digest()
   const initial = PORT_MIN + (digest.readUInt32BE(0) % availableStarts)
 
   for (let offset = 0; offset < availableStarts; offset += 1) {
     const start = PORT_MIN + ((initial - PORT_MIN + offset) % availableStarts)
-    const candidates = names.map((_, index) => start + index)
-    if (candidates.some((port) => reserved.has(port))) continue
-    const availability = await Promise.all(candidates.map(portIsAvailable))
-    if (!availability.every(Boolean)) continue
-    return Object.fromEntries(names.map((name, index) => [name, candidates[index]]))
+    if (await usable(start)) return assign(start)
   }
 
   throw new CliError(`No free port block is available in ${PORT_MIN}-${PORT_MAX}`)
@@ -692,12 +702,17 @@ async function setupWorktree(repository, configDocument, worktree, options = {})
     }
     if (options.scratchBranch) metadata.scratchBranch = options.scratchBranch
     writeJson(metadataPath(repository, id), metadata)
+  } else {
+    const ports = await allocatePorts(repository, metadata.id, configDocument.value.ports, metadata.ports ?? {})
+    if (Object.keys(ports).length !== Object.keys(metadata.ports ?? {}).length) {
+      metadata = updateMetadata(repository, metadata, { ports })
+    }
   }
 
   try {
     copyConfiguredFiles(repository, configDocument.value, targetPath)
     if (options.noHooks) {
-      metadata = updateMetadata(repository, metadata, { setup: "incomplete" })
+      if (metadata.setup !== "complete") metadata = updateMetadata(repository, metadata, { setup: "incomplete" })
       return metadata
     }
     await ensureTrusted(repository, configDocument, targetPath)
@@ -865,7 +880,7 @@ async function createWorktree(repository, configDocument, options = {}) {
       background: options.background,
       scratchBranch: scratch ? branch : undefined,
     })
-    return { metadata, targetPath, resolution }
+    return { repository: refreshed, worktree, metadata, targetPath, resolution }
   } catch (error) {
     console.error(`Setup failed; worktree retained at ${targetPath}`)
     console.error(`Retry: gwt setup ${id}`)
@@ -874,10 +889,10 @@ async function createWorktree(repository, configDocument, options = {}) {
   }
 }
 
-function reportWorktree({ metadata, targetPath, resolution }) {
+function reportWorktree({ repository, worktree, metadata, targetPath, resolution }) {
   console.log(`Worktree ${metadata.id} is ready at ${targetPath}`)
   console.log(branchSummary(resolution))
-  for (const [name, port] of Object.entries(metadata.ports)) console.log(`${name}: ${port}`)
+  printPortsAndEnvironment(repository, worktree, metadata)
   if (metadata.setup === "running") {
     console.log(`Setup is running in the background; log: ${metadata.job.logPath}`)
   }
@@ -1187,6 +1202,20 @@ function commandList(args) {
   }
 }
 
+function printPortsAndEnvironment(repository, worktree, metadata) {
+  for (const [name, port] of Object.entries(metadata?.ports ?? {})) console.log(`${name}: ${port}`)
+  if (!metadata) return
+  try {
+    const environment = worktreeEnvironment(repository, worktree)
+    for (const [name, value] of Object.entries(environment.values)) {
+      if (!Object.hasOwn(metadata.ports ?? {}, name)) console.log(`${name}: ${value}`)
+    }
+    if (environment.reason) console.log(`Environment: ${environment.reason}`)
+  } catch (error) {
+    console.log(`Environment: ${error.message}`)
+  }
+}
+
 function commandInfo(args) {
   if (args.length > 1) throw new CliError("Usage: gwt info [primary|id|branch|path]")
   const repository = discoverRepository()
@@ -1197,18 +1226,7 @@ function commandInfo(args) {
   console.log(`Branch: ${worktree.branch ?? "(detached)"}`)
   console.log(`HEAD: ${worktree.head}`)
   console.log(`Setup: ${jobStatus(metadata) ?? "unmanaged"}`)
-  for (const [name, port] of Object.entries(metadata?.ports ?? {})) console.log(`${name}: ${port}`)
-  if (metadata) {
-    try {
-      const environment = worktreeEnvironment(repository, worktree)
-      for (const [name, value] of Object.entries(environment.values)) {
-        if (!Object.hasOwn(metadata.ports ?? {}, name)) console.log(`${name}: ${value}`)
-      }
-      if (environment.reason) console.log(`Environment: ${environment.reason}`)
-    } catch (error) {
-      console.log(`Environment: ${error.message}`)
-    }
-  }
+  printPortsAndEnvironment(repository, worktree, metadata)
   if (metadata?.setupError) console.log(`Setup error: ${metadata.setupError}`)
 }
 
@@ -1230,7 +1248,7 @@ async function commandSetup(args) {
     background: options.background,
   })
   console.log(`Setup ${metadata.setup}: ${metadata.id}`)
-  for (const [name, port] of Object.entries(metadata.ports)) console.log(`${name}: ${port}`)
+  printPortsAndEnvironment(repository, worktree, metadata)
   if (metadata.setup === "running") console.log(`Log: ${metadata.job.logPath}`)
 }
 
@@ -1520,7 +1538,7 @@ function worktreeEnvironment(repository, worktree) {
 
   const ports = Object.fromEntries(configDocument.value.ports.map((name) => {
     if (!Object.hasOwn(metadata.ports ?? {}, name)) {
-      throw new CliError(`This worktree has no assigned ${name}; recreate it after changing ports`)
+      throw new CliError(`This worktree has no assigned ${name}; run 'gwt setup' to assign it`)
     }
     return [name, String(metadata.ports[name])]
   }))
@@ -2062,7 +2080,8 @@ Options:
 
 Behavior:
   Use this to adopt a worktree created with native 'git worktree add' or to
-  retry a failed setup. Existing copied files and assigned ports are preserved.
+  retry a failed setup. Existing copied files and assigned ports are preserved,
+  and ports added to the configuration since creation are assigned.
   Setup refuses to start while a background setup is already running for the
   same worktree.
 

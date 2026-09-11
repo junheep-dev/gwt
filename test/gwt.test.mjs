@@ -792,8 +792,10 @@ describe("worktree lifecycle", () => {
       },
     })
     assert.equal(gwt(fixture, ["trust"]).status, 0)
-    assert.equal(gwt(fixture, ["new", "feature/env"]).status, 0)
+    const created = gwt(fixture, ["new", "feature/env"])
+    assert.equal(created.status, 0, created.stderr)
     const [metadata] = readMetadata(fixture.repository)
+    assert.match(created.stdout, new RegExp(`^NEXT_PUBLIC_API_ENDPOINT: http://127\\.0\\.0\\.1:${metadata.ports.SERVER_PORT}$`, "m"))
 
     const info = gwt(fixture, ["info", metadata.id])
     assert.equal(info.status, 0, info.stderr)
@@ -827,6 +829,43 @@ describe("worktree lifecycle", () => {
     assert.equal(info.status, 0, info.stderr)
     assert.match(info.stdout, /^Environment: This worktree has no assigned ADMIN_PORT/m)
     assert.match(info.stdout, new RegExp(`^WEB_PORT: ${metadata.ports.WEB_PORT}$`, "m"))
+  })
+
+  test("assigns ports added to the configuration during setup", () => {
+    const fixture = createRepository()
+    writeUserConfig(fixture, { ports: ["WEB_PORT"] })
+    assert.equal(gwt(fixture, ["new", "feature/added-port"]).status, 0)
+    const [created] = readMetadata(fixture.repository)
+
+    writeUserConfig(fixture, {
+      ports: ["WEB_PORT", "ADMIN_PORT"],
+      env: { ADMIN_URL: "http://127.0.0.1:${ADMIN_PORT}" },
+    })
+
+    const setup = gwt(fixture, ["setup", created.id])
+    assert.equal(setup.status, 0, setup.stderr)
+
+    const [metadata] = readMetadata(fixture.repository)
+    assert.equal(metadata.setup, "complete")
+    assert.equal(metadata.ports.WEB_PORT, created.ports.WEB_PORT)
+    assert.equal(metadata.ports.ADMIN_PORT, created.ports.WEB_PORT + 1)
+
+    const expected = new RegExp(`^ADMIN_URL: http://127\\.0\\.0\\.1:${metadata.ports.ADMIN_PORT}$`, "m")
+    assert.match(setup.stdout, expected)
+    assert.match(gwt(fixture, ["info", metadata.id]).stdout, expected)
+  })
+
+  test("keeps a completed setup complete when hooks are skipped", () => {
+    const fixture = createRepository()
+    writeUserConfig(fixture, { ports: ["WEB_PORT"] })
+    assert.equal(gwt(fixture, ["new", "feature/skip-hooks"]).status, 0)
+    const [created] = readMetadata(fixture.repository)
+    assert.equal(created.setup, "complete")
+
+    const setup = gwt(fixture, ["setup", created.id, "--no-hooks"])
+    assert.equal(setup.status, 0, setup.stderr)
+    assert.match(setup.stdout, /^Setup complete:/m)
+    assert.equal(readMetadata(fixture.repository)[0].setup, "complete")
   })
 
   test("adopts a native linked worktree during setup", () => {

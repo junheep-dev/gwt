@@ -148,7 +148,8 @@ current commit as their base and run no setup actions.
 - `copyFiles`: Ignored local files copied from the primary worktree without
   overwriting an existing destination.
 - `ports`: Environment variable names assigned stable ports in the range
-  20000–39999.
+  20000–39999. Names added later are assigned by the next `gwt setup`;
+  ports already assigned never change.
 - `env`: Environment variables loaded alongside assigned ports. Values are
   literal strings with optional `${PORT_NAME}` references to names declared in
   `ports`. Shell expressions and references to arbitrary process variables are
